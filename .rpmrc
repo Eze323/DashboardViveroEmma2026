@@ -1,2 +1,4 @@
 Ini, TOML
-only-built-dependencies[]=core-js
+
+only-built-dependencies[]=*
+ignore-scripts=false

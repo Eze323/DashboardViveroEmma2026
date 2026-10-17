@@ -1,0 +1,2 @@
+Ini, TOML
+only-built-dependencies[]=core-js

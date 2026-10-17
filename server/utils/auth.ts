@@ -4,6 +4,7 @@ import { eq, sql } from 'drizzle-orm'
 import { compare } from 'bcryptjs'
 import { authLoginAttempts, users } from '../../src/db/schema'
 import { useDrizzle } from './drizzle'
+import { getServerEnvironment } from './server-environment'
 
 const AUTH_COOKIE = 'vivero_session'
 const SESSION_DURATION_SECONDS = 60 * 60 * 8
@@ -31,14 +32,18 @@ export function canAccessPanel(role: AuthUser['role']): boolean {
 
 function getSessionSecret(event: H3Event): string {
   const config = useRuntimeConfig(event)
-  if (typeof config.jwtSecret !== 'string' || config.jwtSecret.length < 32) {
+  const environment = getServerEnvironment()
+  const secret = config.jwtSecret
+    || environment.NUXT_JWT_SECRET
+    || environment.JWT_SECRET
+  if (typeof secret !== 'string' || secret.length < 32) {
     throw createError({
       statusCode: 503,
       statusMessage: 'La autenticación del panel no está configurada.'
     })
   }
 
-  return config.jwtSecret
+  return secret
 }
 
 function encodeBase64Url(bytes: Uint8Array): string {

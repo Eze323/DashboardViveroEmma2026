@@ -1,7 +1,7 @@
 [build]
+  command = "bun run build"
+  publish = ".output/public"
 
-command = "bun run build"
-publish = ".output/public"
-
-[build.enviroment]
-NETLIFY_USE_PNMP="false"
+[build.environment]
+  NETLIFY_USE_PNPM = "false"
+  NPM_CONFIG_ONLY_BUILT_DEPENDENCIES = "*"

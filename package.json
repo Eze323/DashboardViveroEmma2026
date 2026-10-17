@@ -2,7 +2,7 @@
   "name": "dashboard-vivero-emma",
   "private": true,
   "type": "module",
-  "pnpm": {"onlyBuiltDependencies": ["core-js"]},
+  "pnpmConfig": {"onlyBuiltDependencies": ["core-js"]},
   "scripts": {
     "build": "nuxt build",
     "dev": "nuxt dev",

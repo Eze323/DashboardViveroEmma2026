@@ -4,6 +4,7 @@
   "type": "module",
   "packgeManager": "pnpm@9.15.4",
   "pnpmConfig": {"onlyBuiltDependencies": ["core-js"]},
+  "pnpm": {"onlyBuiltDependencies": ["core-js"]},
   "scripts": {
     "build": "nuxt build",
     "dev": "nuxt dev",

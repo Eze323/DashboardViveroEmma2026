@@ -16,3 +16,10 @@
   --color-green-900: #0A5331;
   --color-green-950: #052E16;
 }
+
+/* Oculta la insignia flotante inyectada por Netlify */
+netlifty-drawer,
+[data-netlify-deploy-id],
+iframe[src*="netlify"] {
+  display: none !important;
+}

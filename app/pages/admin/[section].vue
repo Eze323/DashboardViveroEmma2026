@@ -247,9 +247,22 @@ const form = reactive<Record<string, string>>({})
 const productOptions = ref<SelectOption[]>([])
 const supplierOptions = ref<SelectOption[]>([])
 const customerOptions = ref<SelectOption[]>([{ label: 'Consumidor final', value: 'consumer-final' }])
+const isUploadingProductImage = ref(false)
+const imageUploadError = ref('')
+const imageInputRef = ref<HTMLInputElement | null>(null)
 const focusedProductImage = ref<{ src: string, alt: string } | null>(null)
 const failedProductImages = ref<Record<string, boolean>>({})
 const localDateTime = (date = new Date()) => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+
+function triggerImagePicker() {
+  imageInputRef.value?.click()
+}
+
+watch(() => form.imageUrl, (newUrl) => {
+  if (newUrl && failedProductImages.value[newUrl]) {
+    delete failedProductImages.value[newUrl]
+  }
+})
 
 watch(modalOpen, (isOpen) => {
   if (!isOpen) salesDraftStore.cancelEditDraft()
@@ -557,6 +570,52 @@ function validationMessage(field: ManagementField): string | undefined {
   return `Completa “${field.label}” para continuar.`
 }
 
+async function uploadProductImage(file: File | null, fromUrl?: string) {
+  if (!file && !fromUrl) return undefined
+
+  const formData = new FormData()
+  if (file) {
+    formData.append('image', file)
+    formData.append('source', 'upload')
+  }
+  if (fromUrl) {
+    formData.append('url', fromUrl)
+    formData.append('source', 'url')
+  }
+
+  isUploadingProductImage.value = true
+  imageUploadError.value = ''
+
+  try {
+    const response = await $fetch<{ data?: { url?: string } }>('/api/upload/imgbb', {
+      method: 'POST',
+      body: formData
+    })
+
+    const uploadedUrl = response.data?.url?.trim()
+    if (!uploadedUrl) {
+      throw new Error('La respuesta de imgbb no devolvió una URL válida.')
+    }
+
+    form.imageUrl = uploadedUrl
+    if (failedProductImages.value[uploadedUrl]) {
+      delete failedProductImages.value[uploadedUrl]
+    }
+    return uploadedUrl
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'No se pudo subir la imagen.'
+    imageUploadError.value = message
+    toast.add({
+      title: 'No se pudo guardar la imagen',
+      description: message,
+      color: 'error'
+    })
+    return undefined
+  } finally {
+    isUploadingProductImage.value = false
+  }
+}
+
 async function saveDatabaseRecord() {
   if (section.value === 'ventas') {
     await salesDraftStore.hydrateDraft()
@@ -582,6 +641,12 @@ async function saveDatabaseRecord() {
     if (message) throw new Error(message)
   }
   if (section.value === 'proveedores' && !String(form.nombre ?? '').trim()) throw new Error('Ingresa el nombre del proveedor.')
+  if (section.value === 'productos') {
+    const imageUrl = String(form.imageUrl ?? '').trim()
+    if (imageUrl && !/^https?:\/\//i.test(imageUrl)) {
+      throw new Error('La URL de imagen debe empezar con http:// o https://.')
+    }
+  }
   const url = editingRecord.value
     ? `/api/management/${section.value}/${editingRecord.value.id}`
     : `/api/management/${section.value}`
@@ -1049,20 +1114,48 @@ function visibleCardFields(row: ManagementRow) {
               :description="formField.help"
             >
               <template #default>
-                <component
-                  :is="formField.type === 'select' ? USelectComponent : UInputComponent"
-                  v-model="form[formField.key]"
-                  :items="formField.type === 'select'
-                    ? formField.key === 'productoId' ? productOptions : formField.key === 'proveedorId' ? supplierOptions : formField.options ?? []
-                    : undefined"
-                  :type="formField.type === 'select' ? undefined : formField.type ?? 'text'"
-                  :min="formField.type === 'number' ? 0 : undefined"
-                  :step="formField.format === 'currency' ? '0.01' : formField.type === 'number' ? '1' : undefined"
-                  :disabled="formField.readonly"
-                  :placeholder="section === 'productos' && formField.key === 'imageUrl' ? 'https://...' : undefined"
-                  class="w-full"
-                />
-                <div v-if="section === 'productos' && formField.key === 'imageUrl'" class="mt-3 space-y-2">
+                <div v-if="section === 'productos' && formField.key === 'imageUrl'" class="space-y-3">
+                  <div class="flex flex-col gap-2 sm:flex-row">
+                    <UInput
+                      v-model="form.imageUrl"
+                      type="url"
+                      placeholder="https://... o pega una URL"
+                      class="w-full"
+                    />
+                    <UButton
+                      label="Subir imagen"
+                      icon="i-lucide-upload"
+                      color="primary"
+                      variant="subtle"
+                      class="min-h-11 shrink-0"
+                      :loading="isUploadingProductImage"
+                      :disabled="!form.imageUrl || isUploadingProductImage"
+                      @click="uploadProductImage(null, form.imageUrl)"
+                    />
+                  </div>
+                  <div class="flex items-center gap-3">
+                    <input
+                      ref="imageInputRef"
+                      type="file"
+                      accept="image/*"
+                      class="hidden"
+                      @change="async (event) => {
+                        const file = (event.target as HTMLInputElement).files?.[0] ?? null
+                        if (!file) return
+                        await uploadProductImage(file)
+                        ;(event.target as HTMLInputElement).value = ''
+                      }"
+                    >
+                    <UButton
+                      label="Elegir archivo"
+                      icon="i-lucide-image"
+                      color="neutral"
+                      variant="subtle"
+                      class="min-h-11"
+                      @click="triggerImagePicker"
+                    />
+                    <span v-if="imageUploadError" class="text-xs text-error">{{ imageUploadError }}</span>
+                  </div>
                   <button
                     v-if="form.imageUrl && !failedProductImages[form.imageUrl]"
                     type="button"
@@ -1079,9 +1172,23 @@ function visibleCardFields(row: ManagementRow) {
                     >
                   </button>
                   <p v-else class="text-xs text-muted">
-                    {{ form.imageUrl ? 'No se pudo cargar la imagen desde esa URL.' : 'La vista previa aparecerá aquí al ingresar una URL de imagen.' }}
+                    {{ form.imageUrl ? 'No se pudo cargar la imagen desde esa URL.' : 'Puedes pegar una URL o elegir un archivo para cargarla en imgbb.' }}
                   </p>
                 </div>
+                <component
+                  v-else
+                  :is="formField.type === 'select' ? USelectComponent : UInputComponent"
+                  v-model="form[formField.key]"
+                  :items="formField.type === 'select'
+                    ? formField.key === 'productoId' ? productOptions : formField.key === 'proveedorId' ? supplierOptions : formField.options ?? []
+                    : undefined"
+                  :type="formField.type === 'select' ? undefined : formField.type ?? 'text'"
+                  :min="formField.type === 'number' ? 0 : undefined"
+                  :step="formField.format === 'currency' ? '0.01' : formField.type === 'number' ? '1' : undefined"
+                  :disabled="formField.readonly"
+                  :placeholder="section === 'productos' && formField.key === 'imageUrl' ? 'https://...' : undefined"
+                  class="w-full"
+                />
               </template>
             </UFormField>
           </template>

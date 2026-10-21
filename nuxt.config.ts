@@ -20,7 +20,8 @@ export default defineNuxtConfig({
 
   runtimeConfig: {
     jwtSecret: environment.NODE_ENV === 'development' ? environment.JWT_SECRET ?? '' : '',
-    databaseUrl: environment.NODE_ENV === 'development' ? environment.DATABASE_URL ?? environment.DIRECT_URL ?? '' : ''
+    databaseUrl: environment.NODE_ENV === 'development' ? environment.DATABASE_URL ?? environment.DIRECT_URL ?? '' : '',
+    imgbbApiKey: environment.IMGBB_API_KEY ?? ''
   },
 
   routeRules: {

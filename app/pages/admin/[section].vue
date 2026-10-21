@@ -249,13 +249,15 @@ const supplierOptions = ref<SelectOption[]>([])
 const customerOptions = ref<SelectOption[]>([{ label: 'Consumidor final', value: 'consumer-final' }])
 const isUploadingProductImage = ref(false)
 const imageUploadError = ref('')
-const imageInputRef = ref<HTMLInputElement | null>(null)
+const imageInputRef = ref<HTMLInputElement | HTMLInputElement[] | null>(null)
 const focusedProductImage = ref<{ src: string, alt: string } | null>(null)
 const failedProductImages = ref<Record<string, boolean>>({})
 const localDateTime = (date = new Date()) => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
 
 function triggerImagePicker() {
-  imageInputRef.value?.click()
+  const el = Array.isArray(imageInputRef.value) ? imageInputRef.value[0] : imageInputRef.value
+  const input = el || (typeof document !== 'undefined' ? (document.getElementById('product-image-file-input') as HTMLInputElement | null) : null)
+  input?.click()
 }
 
 watch(() => form.imageUrl, (newUrl) => {
@@ -602,8 +604,8 @@ async function uploadProductImage(file: File | null, fromUrl?: string) {
       delete failedProductImages.value[uploadedUrl]
     }
     return uploadedUrl
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'No se pudo subir la imagen.'
+  } catch (error: any) {
+    const message = error?.data?.statusMessage || error?.statusMessage || (error instanceof Error ? error.message : 'No se pudo subir la imagen.')
     imageUploadError.value = message
     toast.add({
       title: 'No se pudo guardar la imagen',
@@ -1135,6 +1137,7 @@ function visibleCardFields(row: ManagementRow) {
                   </div>
                   <div class="flex items-center gap-3">
                     <input
+                      id="product-image-file-input"
                       ref="imageInputRef"
                       type="file"
                       accept="image/*"

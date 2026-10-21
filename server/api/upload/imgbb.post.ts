@@ -53,13 +53,22 @@ export default defineEventHandler(async (event) => {
     ...(payload.source !== 'url' && payload.image ? { image: payload.image } : {})
   })
 
-  const response = await $fetch<{ data?: { url?: string; display_url?: string; thumb?: string; medium?: string } }>('https://api.imgbb.com/1/upload', {
-    method: 'POST',
-    body: requestBody,
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded'
-    }
-  })
+  let response: { data?: { url?: string; display_url?: string; thumb?: string; medium?: string } }
+  try {
+    response = await $fetch<{ data?: { url?: string; display_url?: string; thumb?: string; medium?: string } }>('https://api.imgbb.com/1/upload', {
+      method: 'POST',
+      body: requestBody,
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    })
+  } catch (err: any) {
+    const errorMsg = err?.data?.error?.message || err?.message || 'Error al comunicarse con la API de ImgBB.'
+    throw createError({
+      statusCode: err?.statusCode || 502,
+      statusMessage: `ImgBB: ${errorMsg}`
+    })
+  }
 
   if (!response.data?.url) {
     throw createError({

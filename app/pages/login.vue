@@ -12,10 +12,11 @@ const errorMessage = ref('')
 
 function getErrorMessage(error: unknown): string {
   if (typeof error === 'object' && error !== null && 'statusCode' in error) {
-    if (error.statusCode === 401) return 'El correo o la contraseña no son correctos.'
-    if (error.statusCode === 403) return 'Tu cuenta no tiene permisos para acceder a este panel.'
-    if (error.statusCode === 429) return 'Se alcanzó el límite de intentos. Espera 15 minutos antes de volver a intentar.'
-    if (error.statusCode === 503) return 'El acceso aún no está configurado en el servidor.'
+    const err = error as { statusCode?: number; data?: { statusMessage?: string; message?: string }; statusMessage?: string }
+    if (err.statusCode === 401) return 'El correo o la contraseña no son correctos.'
+    if (err.statusCode === 403) return 'Tu cuenta no tiene permisos para acceder a este panel.'
+    if (err.statusCode === 429) return 'Se alcanzó el límite de intentos. Espera 15 minutos antes de volver a intentar.'
+    if (err.statusCode === 503) return err.data?.statusMessage || err.statusMessage || 'El acceso aún no está configurado en el servidor.'
   }
 
   return 'No se pudo iniciar sesión. Inténtalo nuevamente.'

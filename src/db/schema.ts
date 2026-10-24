@@ -29,7 +29,8 @@ export const products = pgTable('products', {
   sku: varchar('sku', { length: 50 }),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
-  archivedAt: timestamp('archived_at')
+  archivedAt: timestamp('archived_at'),
+  deletedAt: timestamp('deleted_at', { mode: 'date' })
 })
 
 export const customers = pgTable('customers', {
@@ -41,7 +42,8 @@ export const customers = pgTable('customers', {
   taxId: varchar('tax_id', { length: 20 }),
   ivaCondition: varchar('iva_condition', { length: 50 }),
   fiscalAddress: text('fiscal_address'),
-  archivedAt: timestamp('archived_at')
+  archivedAt: timestamp('archived_at'),
+  deletedAt: timestamp('deleted_at', { mode: 'date' })
 })
 
 export const sales = pgTable('sales', {
@@ -68,7 +70,8 @@ export const sales = pgTable('sales', {
   billingStatus: varchar('billing_status', { length: 20 }),
   inventoryAppliedAt: timestamp('inventory_applied_at'),
   createdAt: timestamp('created_at'),
-  updatedAt: timestamp('updated_at')
+  updatedAt: timestamp('updated_at'),
+  deletedAt: timestamp('deleted_at', { mode: 'date' })
 })
 
 export const saleItems = pgTable('sale_items', {
@@ -78,13 +81,15 @@ export const saleItems = pgTable('sale_items', {
   quantity: integer('quantity').notNull(),
   unitPrice: decimal('unit_price', { precision: 10, scale: 2 }).notNull(),
   potSize: varchar('pot_size', { length: 50 }),
-  archivedAt: timestamp('archived_at')
+  archivedAt: timestamp('archived_at'),
+  deletedAt: timestamp('deleted_at', { mode: 'date' })
 })
 
 export const suppliers = pgTable('suppliers', {
   id: bigserial('id', { mode: 'number' }).primaryKey(),
   name: varchar('name', { length: 255 }).notNull(),
-  archivedAt: timestamp('archived_at')
+  archivedAt: timestamp('archived_at'),
+  deletedAt: timestamp('deleted_at', { mode: 'date' })
 })
 
 export const purchases = pgTable('purchases', {
@@ -94,7 +99,8 @@ export const purchases = pgTable('purchases', {
   quantity: integer('quantity').notNull(),
   purchasePrice: decimal('purchase_price', { precision: 10, scale: 2 }).notNull(),
   purchaseDate: timestamp('purchase_date').notNull(),
-  archivedAt: timestamp('archived_at')
+  archivedAt: timestamp('archived_at'),
+  deletedAt: timestamp('deleted_at', { mode: 'date' })
 })
 
 export const supplierPrices = pgTable('supplier_prices', {
@@ -104,7 +110,8 @@ export const supplierPrices = pgTable('supplier_prices', {
   purchasePrice: decimal('purchase_price', { precision: 10, scale: 2 }).notNull(),
   validFrom: timestamp('valid_from'),
   validTo: timestamp('valid_to'),
-  archivedAt: timestamp('archived_at')
+  archivedAt: timestamp('archived_at'),
+  deletedAt: timestamp('deleted_at', { mode: 'date' })
 })
 
 export const plantPotPrices = pgTable('plant_pot_prices', {
@@ -112,7 +119,8 @@ export const plantPotPrices = pgTable('plant_pot_prices', {
   productId: bigint('product_id', { mode: 'number' }).notNull(),
   potSize: varchar('pot_size', { length: 50 }).notNull(),
   price: decimal('price', { precision: 10, scale: 2 }).notNull(),
-  archivedAt: timestamp('archived_at')
+  archivedAt: timestamp('archived_at'),
+  deletedAt: timestamp('deleted_at', { mode: 'date' })
 })
 
 export const locations = pgTable('locations', {
@@ -125,7 +133,8 @@ export const locations = pgTable('locations', {
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
   status: varchar('status', { length: 255 }).notNull().default('active'),
-  archivedAt: timestamp('archived_at')
+  archivedAt: timestamp('archived_at'),
+  deletedAt: timestamp('deleted_at', { mode: 'date' })
 })
 
 export const zones = pgTable('zones', {
@@ -138,7 +147,8 @@ export const zones = pgTable('zones', {
   color: varchar('color', { length: 255 }).notNull(),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
-  archivedAt: timestamp('archived_at')
+  archivedAt: timestamp('archived_at'),
+  deletedAt: timestamp('deleted_at', { mode: 'date' })
 })
 
 export const users = pgTable('users', {
@@ -147,7 +157,8 @@ export const users = pgTable('users', {
   email: varchar('email', { length: 255 }).notNull(),
   password: varchar('password', { length: 255 }).notNull(),
   role: roleEnum('role'),
-  createdAt: timestamp('created_at')
+  createdAt: timestamp('created_at'),
+  deletedAt: timestamp('deleted_at', { mode: 'date' })
 })
 
 export const authLoginAttempts = pgTable('auth_login_attempts', {

@@ -1,4 +1,4 @@
-import { and, asc, count, countDistinct, desc, eq, ilike, isNull, or, sql } from 'drizzle-orm'
+import { and, asc, count, countDistinct, desc, eq, ilike, or, sql } from 'drizzle-orm'
 import { getRouterParam } from 'h3'
 import {
   customers,
@@ -14,7 +14,8 @@ import {
   zones
 } from '../../../src/db/schema'
 import { useDrizzle } from '../../utils/drizzle'
-import { archiveFilter, managementSections, paginationMeta, parseManagementQuery } from '../../utils/management'
+import { managementSections, paginationMeta, parseManagementQuery } from '../../utils/management'
+import { notDeleted, softDeleteFilter } from '../../utils/soft-delete'
 
 export default defineEventHandler(async (event) => {
   const section = getRouterParam(event, 'section') ?? ''
@@ -29,7 +30,7 @@ export default defineEventHandler(async (event) => {
   switch (section) {
     case 'productos': {
       const where = and(
-        archiveFilter(products.archivedAt, query.archived),
+        softDeleteFilter(products, query.archived),
         query.search ? or(ilike(products.name, pattern), ilike(products.category, pattern), ilike(products.sku, pattern)) : undefined,
         query.status ? eq(products.published, query.status === 'Publicado') : undefined
       )
@@ -52,7 +53,8 @@ export default defineEventHandler(async (event) => {
           imageUrl: row.imageUrl ?? '',
           precio: Number(row.salePrice),
           estado: row.published ? (row.stock > 0 ? 'Publicado' : 'Sin stock') : 'Borrador',
-          archivado: row.archivedAt !== null
+          archivado: row.deletedAt !== null || row.archivedAt !== null,
+          deletedAt: row.deletedAt
         })),
         meta: paginationMeta(query.page, query.limit, totals[0]?.total ?? 0)
       }
@@ -60,7 +62,7 @@ export default defineEventHandler(async (event) => {
 
     case 'clientes': {
       const where = and(
-        archiveFilter(customers.archivedAt, query.archived),
+        softDeleteFilter(customers, query.archived),
         query.search ? or(ilike(customers.name, pattern), ilike(customers.email, pattern), ilike(customers.phone, pattern)) : undefined
       )
       const [rows, totals] = await Promise.all([
@@ -73,8 +75,9 @@ export default defineEventHandler(async (event) => {
           taxId: customers.taxId,
           ivaCondition: customers.ivaCondition,
           fiscalAddress: customers.fiscalAddress,
-          purchases: sql<number>`(select count(*)::int from ${sales} where ${sales.customerId} = ${customers.id})`,
-          archivedAt: customers.archivedAt
+          purchases: sql<number>`(select count(*)::int from ${sales} where ${sales.customerId} = ${customers.id} and ${sales.deletedAt} is null)`,
+          archivedAt: customers.archivedAt,
+          deletedAt: customers.deletedAt
         }).from(customers).where(where).orderBy(asc(customers.name), asc(customers.id)).limit(query.limit).offset(query.offset),
         db.select({ total: count() }).from(customers).where(where)
       ])
@@ -91,7 +94,8 @@ export default defineEventHandler(async (event) => {
           ivaCondition: row.ivaCondition ?? '',
           fiscalAddress: row.fiscalAddress ?? '',
           compras: row.purchases,
-          archivado: row.archivedAt !== null
+          archivado: row.deletedAt !== null || row.archivedAt !== null,
+          deletedAt: row.deletedAt
         })),
         meta: paginationMeta(query.page, query.limit, totals[0]?.total ?? 0)
       }
@@ -100,6 +104,7 @@ export default defineEventHandler(async (event) => {
     case 'ventas':
     case 'facturas': {
       const where = and(
+        softDeleteFilter(sales, query.archived),
         query.search ? or(ilike(sales.customer, pattern), ilike(sales.seller, pattern), ilike(sales.status, pattern), sql`${sales.id}::text ilike ${pattern}`) : undefined,
         query.status ? eq(sales.status, query.status) : undefined
       )
@@ -120,7 +125,8 @@ export default defineEventHandler(async (event) => {
           cae: sales.cae,
           caeExpiration: sales.caeExpiration,
           inventoryAppliedAt: sales.inventoryAppliedAt,
-          itemCount: sql<number>`(select count(*)::int from ${saleItems} where ${saleItems.saleId} = ${sales.id} and ${saleItems.archivedAt} is null)`
+          deletedAt: sales.deletedAt,
+          itemCount: sql<number>`(select count(*)::int from ${saleItems} where ${saleItems.saleId} = ${sales.id} and ${saleItems.deletedAt} is null)`
         }).from(sales).where(where).orderBy(desc(sales.date), desc(sales.id)).limit(query.limit).offset(query.offset),
         db.select({ total: count() }).from(sales).where(where)
       ])
@@ -146,7 +152,9 @@ export default defineEventHandler(async (event) => {
           editable: !row.cae
             && row.billingStatus !== 'billed'
             && (row.inventoryAppliedAt !== null || row.status !== 'Completada'),
-          inventoryManaged: row.inventoryAppliedAt !== null
+          inventoryManaged: row.inventoryAppliedAt !== null,
+          archivado: row.deletedAt !== null,
+          deletedAt: row.deletedAt
         })),
         meta: paginationMeta(query.page, query.limit, totals[0]?.total ?? 0)
       }
@@ -154,7 +162,7 @@ export default defineEventHandler(async (event) => {
 
     case 'categorias': {
       const where = and(
-        isNull(products.archivedAt),
+        notDeleted(products),
         query.search ? ilike(products.category, pattern) : undefined
       )
       const [rows, totals] = await Promise.all([
@@ -173,7 +181,10 @@ export default defineEventHandler(async (event) => {
     }
 
     case 'vendedores': {
-      const where = query.search ? ilike(sales.seller, pattern) : undefined
+      const where = and(
+        notDeleted(sales),
+        query.search ? ilike(sales.seller, pattern) : undefined
+      )
       const [rows, totals] = await Promise.all([
         db.select({
           nombre: sales.seller,
@@ -190,15 +201,19 @@ export default defineEventHandler(async (event) => {
     }
 
     case 'accesos': {
-      const where = query.search
-        ? or(ilike(users.name, pattern), ilike(users.email, pattern), ilike(users.role, pattern))
-        : undefined
+      const where = and(
+        softDeleteFilter(users, query.archived),
+        query.search
+          ? or(ilike(users.name, pattern), ilike(users.email, pattern), ilike(users.role, pattern))
+          : undefined
+      )
       const [rows, totals] = await Promise.all([
         db.select({
           id: users.id,
           nombre: users.name,
           email: users.email,
-          rol: users.role
+          rol: users.role,
+          deletedAt: users.deletedAt
         }).from(users).where(where).orderBy(asc(users.name), asc(users.id)).limit(query.limit).offset(query.offset),
         db.select({ total: count() }).from(users).where(where)
       ])
@@ -209,7 +224,9 @@ export default defineEventHandler(async (event) => {
           id: String(user.id),
           nombre: user.nombre,
           email: user.email,
-          rol: user.rol ?? 'user'
+          rol: user.rol ?? 'user',
+          archivado: user.deletedAt !== null,
+          deletedAt: user.deletedAt
         })),
         meta: paginationMeta(query.page, query.limit, totals[0]?.total ?? 0)
       }
@@ -217,7 +234,7 @@ export default defineEventHandler(async (event) => {
 
     case 'proveedores': {
       const where = and(
-        archiveFilter(suppliers.archivedAt, query.archived),
+        softDeleteFilter(suppliers, query.archived),
         query.search ? ilike(suppliers.name, pattern) : undefined
       )
       const [rows, totals] = await Promise.all([
@@ -227,14 +244,19 @@ export default defineEventHandler(async (event) => {
       return {
         section,
         source: 'database' as const,
-        data: rows.map(row => ({ id: String(row.id), nombre: row.name, archivado: row.archivedAt !== null })),
+        data: rows.map(row => ({
+          id: String(row.id),
+          nombre: row.name,
+          archivado: row.deletedAt !== null || row.archivedAt !== null,
+          deletedAt: row.deletedAt
+        })),
         meta: paginationMeta(query.page, query.limit, totals[0]?.total ?? 0)
       }
     }
 
     case 'compras': {
       const where = and(
-        archiveFilter(purchases.archivedAt, query.archived),
+        softDeleteFilter(purchases, query.archived),
         query.search ? or(ilike(products.name, pattern), ilike(suppliers.name, pattern), sql`${purchases.id}::text ilike ${pattern}`) : undefined
       )
       const [rows, totals] = await Promise.all([
@@ -247,7 +269,8 @@ export default defineEventHandler(async (event) => {
           quantity: purchases.quantity,
           price: purchases.purchasePrice,
           date: purchases.purchaseDate,
-          archivedAt: purchases.archivedAt
+          archivedAt: purchases.archivedAt,
+          deletedAt: purchases.deletedAt
         }).from(purchases)
           .innerJoin(products, eq(purchases.productId, products.id))
           .innerJoin(suppliers, eq(purchases.supplierId, suppliers.id))
@@ -269,7 +292,8 @@ export default defineEventHandler(async (event) => {
           cantidad: row.quantity,
           precio: Number(row.price),
           fecha: row.date.toISOString(),
-          archivado: row.archivedAt !== null
+          archivado: row.deletedAt !== null || row.archivedAt !== null,
+          deletedAt: row.deletedAt
         })),
         meta: paginationMeta(query.page, query.limit, totals[0]?.total ?? 0)
       }
@@ -277,7 +301,7 @@ export default defineEventHandler(async (event) => {
 
     case 'precios-proveedor': {
       const where = and(
-        archiveFilter(supplierPrices.archivedAt, query.archived),
+        softDeleteFilter(supplierPrices, query.archived),
         query.search ? or(ilike(products.name, pattern), ilike(suppliers.name, pattern)) : undefined
       )
       const [rows, totals] = await Promise.all([
@@ -290,7 +314,8 @@ export default defineEventHandler(async (event) => {
           price: supplierPrices.purchasePrice,
           validFrom: supplierPrices.validFrom,
           validTo: supplierPrices.validTo,
-          archivedAt: supplierPrices.archivedAt
+          archivedAt: supplierPrices.archivedAt,
+          deletedAt: supplierPrices.deletedAt
         }).from(supplierPrices)
           .innerJoin(products, eq(supplierPrices.productId, products.id))
           .innerJoin(suppliers, eq(supplierPrices.supplierId, suppliers.id))
@@ -312,7 +337,8 @@ export default defineEventHandler(async (event) => {
           precio: Number(row.price),
           desde: row.validFrom?.toISOString() ?? '',
           hasta: row.validTo?.toISOString() ?? '',
-          archivado: row.archivedAt !== null
+          archivado: row.deletedAt !== null || row.archivedAt !== null,
+          deletedAt: row.deletedAt
         })),
         meta: paginationMeta(query.page, query.limit, totals[0]?.total ?? 0)
       }
@@ -320,7 +346,7 @@ export default defineEventHandler(async (event) => {
 
     case 'precios-maceta': {
       const where = and(
-        archiveFilter(plantPotPrices.archivedAt, query.archived),
+        softDeleteFilter(plantPotPrices, query.archived),
         query.search ? or(ilike(products.name, pattern), ilike(plantPotPrices.potSize, pattern)) : undefined
       )
       const [rows, totals] = await Promise.all([
@@ -330,7 +356,8 @@ export default defineEventHandler(async (event) => {
           product: products.name,
           size: plantPotPrices.potSize,
           price: plantPotPrices.price,
-          archivedAt: plantPotPrices.archivedAt
+          archivedAt: plantPotPrices.archivedAt,
+          deletedAt: plantPotPrices.deletedAt
         }).from(plantPotPrices)
           .innerJoin(products, eq(plantPotPrices.productId, products.id))
           .where(where).orderBy(asc(products.name), asc(plantPotPrices.potSize), asc(plantPotPrices.id)).limit(query.limit).offset(query.offset),
@@ -347,7 +374,8 @@ export default defineEventHandler(async (event) => {
           producto: row.product,
           medida: row.size,
           precio: Number(row.price),
-          archivado: row.archivedAt !== null
+          archivado: row.deletedAt !== null || row.archivedAt !== null,
+          deletedAt: row.deletedAt
         })),
         meta: paginationMeta(query.page, query.limit, totals[0]?.total ?? 0)
       }
@@ -355,7 +383,7 @@ export default defineEventHandler(async (event) => {
 
     case 'ubicaciones': {
       const where = and(
-        archiveFilter(locations.archivedAt, query.archived),
+        softDeleteFilter(locations, query.archived),
         query.search ? or(ilike(locations.name, pattern), ilike(locations.area, pattern)) : undefined,
         query.status ? eq(locations.status, query.status) : undefined
       )
@@ -374,7 +402,8 @@ export default defineEventHandler(async (event) => {
           x: row.x,
           y: row.y,
           estado: row.status,
-          archivado: row.archivedAt !== null
+          archivado: row.deletedAt !== null || row.archivedAt !== null,
+          deletedAt: row.deletedAt
         })),
         meta: paginationMeta(query.page, query.limit, totals[0]?.total ?? 0)
       }
@@ -382,7 +411,7 @@ export default defineEventHandler(async (event) => {
 
     case 'zonas': {
       const where = and(
-        archiveFilter(zones.archivedAt, query.archived),
+        softDeleteFilter(zones, query.archived),
         query.search ? or(ilike(zones.name, pattern), ilike(zones.color, pattern)) : undefined
       )
       const [rows, totals] = await Promise.all([
@@ -400,7 +429,8 @@ export default defineEventHandler(async (event) => {
           ancho: row.width,
           alto: row.height,
           color: row.color,
-          archivado: row.archivedAt !== null
+          archivado: row.deletedAt !== null || row.archivedAt !== null,
+          deletedAt: row.deletedAt
         })),
         meta: paginationMeta(query.page, query.limit, totals[0]?.total ?? 0)
       }

@@ -1,7 +1,15 @@
-import { Buffer } from 'node:buffer'
 import { readFormData } from 'h3'
 import { z } from 'zod'
 import { getServerEnvironment } from '../../utils/server-environment'
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  let binary = ''
+  const bytes = new Uint8Array(buffer)
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]!)
+  }
+  return btoa(binary)
+}
 
 const imgbbUploadSchema = z.object({
   image: z.string().trim().min(1).optional(),
@@ -31,7 +39,7 @@ export default defineEventHandler(async (event) => {
   const base64Image = typeof rawImage === 'string'
     ? rawImage
     : rawImage && typeof (rawImage as { arrayBuffer?: () => Promise<ArrayBuffer> }).arrayBuffer === 'function'
-      ? Buffer.from(await (rawImage as { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer()).toString('base64')
+      ? arrayBufferToBase64(await (rawImage as { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer())
       : undefined
 
   const payload = imgbbUploadSchema.parse({

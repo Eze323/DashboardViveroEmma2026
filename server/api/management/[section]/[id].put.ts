@@ -16,6 +16,7 @@ import {
 import { useDrizzle } from '../../../utils/drizzle'
 import { isUniqueConstraintError, managementSections, parsePositiveId } from '../../../utils/management'
 import { priceSaleLines } from '../../../utils/sale-pricing'
+import { notDeleted } from '../../../utils/soft-delete'
 
 const idField = z.coerce.number().int().positive().safe()
 const priceField = z.coerce.number().finite().min(0).max(99999999.99)
@@ -145,10 +146,9 @@ export default defineEventHandler(async (event) => {
           ...(input.precio !== undefined ? { salePrice: input.precio.toFixed(2) } : {}),
           ...(input.stock !== undefined ? { stock: input.stock } : {}),
           ...(input.potSize !== undefined ? { potSize: input.potSize || null } : {}),
-          ...(input.imageUrl !== undefined ? { imageUrl: input.imageUrl || null } : {}),
           ...(input.estado !== undefined ? { published: input.estado === 'Publicado' } : {}),
           updatedAt: new Date()
-        }).where(and(eq(products.id, id), isNull(products.archivedAt))).returning({ id: products.id })
+        }).where(and(eq(products.id, id), notDeleted(products))).returning({ id: products.id })
         requireRow(updated[0], 'actualizar el producto')
         return { success: true, data: { id: String(id) } }
       }
@@ -163,7 +163,7 @@ export default defineEventHandler(async (event) => {
           ...(input.taxId !== undefined ? { taxId: input.taxId || null } : {}),
           ...(input.ivaCondition !== undefined ? { ivaCondition: input.ivaCondition || null } : {}),
           ...(input.fiscalAddress !== undefined ? { fiscalAddress: input.fiscalAddress || null } : {})
-        }).where(and(eq(customers.id, id), isNull(customers.archivedAt))).returning({ id: customers.id })
+        }).where(and(eq(customers.id, id), notDeleted(customers))).returning({ id: customers.id })
         requireRow(updated[0], 'actualizar el cliente')
         return { success: true, data: { id: String(id) } }
       }
@@ -171,7 +171,7 @@ export default defineEventHandler(async (event) => {
       case 'proveedores': {
         const input = supplierInput.parse(body)
         const updated = await db.update(suppliers).set({ name: input.nombre! })
-          .where(and(eq(suppliers.id, id), isNull(suppliers.archivedAt))).returning({ id: suppliers.id })
+          .where(and(eq(suppliers.id, id), notDeleted(suppliers))).returning({ id: suppliers.id })
         requireRow(updated[0], 'actualizar el proveedor')
         return { success: true, data: { id: String(id) } }
       }
@@ -179,15 +179,15 @@ export default defineEventHandler(async (event) => {
       case 'compras': {
         const input = purchaseInput.parse(body)
         await db.transaction(async (tx) => {
-          const [old] = await tx.select().from(purchases).where(and(eq(purchases.id, id), isNull(purchases.archivedAt))).limit(1)
+          const [old] = await tx.select().from(purchases).where(and(eq(purchases.id, id), notDeleted(purchases))).limit(1)
           const oldPurchase = requireRow(old, 'encontrar la compra')
           const nextProductId = input.productoId ?? oldPurchase.productId
           const nextSupplierId = input.proveedorId ?? oldPurchase.supplierId
           const nextQuantity = input.cantidad ?? oldPurchase.quantity
           const nextPrice = input.precio?.toFixed(2) ?? oldPurchase.purchasePrice
           const nextDate = input.fecha ? new Date(input.fecha) : oldPurchase.purchaseDate
-          const [product] = await tx.select({ id: products.id }).from(products).where(and(eq(products.id, nextProductId), isNull(products.archivedAt))).limit(1)
-          const [supplier] = await tx.select({ id: suppliers.id }).from(suppliers).where(and(eq(suppliers.id, nextSupplierId), isNull(suppliers.archivedAt))).limit(1)
+          const [product] = await tx.select({ id: products.id }).from(products).where(and(eq(products.id, nextProductId), notDeleted(products))).limit(1)
+          const [supplier] = await tx.select({ id: suppliers.id }).from(suppliers).where(and(eq(suppliers.id, nextSupplierId), notDeleted(suppliers))).limit(1)
           if (!product || !supplier) throw createError({ statusCode: 400, statusMessage: 'Selecciona un producto y proveedor activos.' })
           const deltas = new Map<number, number>()
           deltas.set(oldPurchase.productId, (deltas.get(oldPurchase.productId) ?? 0) - oldPurchase.quantity)
@@ -212,7 +212,7 @@ export default defineEventHandler(async (event) => {
           ...(input.precio !== undefined ? { purchasePrice: input.precio.toFixed(2) } : {}),
           ...(input.desde !== undefined ? { validFrom: input.desde ? new Date(input.desde) : null } : {}),
           ...(input.hasta !== undefined ? { validTo: input.hasta ? new Date(input.hasta) : null } : {})
-        }).where(and(eq(supplierPrices.id, id), isNull(supplierPrices.archivedAt))).returning({ id: supplierPrices.id })
+        }).where(and(eq(supplierPrices.id, id), notDeleted(supplierPrices))).returning({ id: supplierPrices.id })
         requireRow(updated[0], 'actualizar el precio de proveedor')
         return { success: true, data: { id: String(id) } }
       }
@@ -222,8 +222,8 @@ export default defineEventHandler(async (event) => {
         const updated = await db.update(plantPotPrices).set({
           ...(input.productoId !== undefined ? { productId: input.productoId } : {}),
           ...(input.medida !== undefined ? { potSize: input.medida } : {}),
-          ...(input.precio !== undefined ? { price: input.precio.toFixed(2) } : {})
-        }).where(and(eq(plantPotPrices.id, id), isNull(plantPotPrices.archivedAt))).returning({ id: plantPotPrices.id })
+          ...(input.precio !== undefined ? { price: input.precio.toFixed(2) } : {}),
+        }).where(and(eq(plantPotPrices.id, id), notDeleted(plantPotPrices))).returning({ id: plantPotPrices.id })
         requireRow(updated[0], 'actualizar el precio por tamaño')
         return { success: true, data: { id: String(id) } }
       }
@@ -238,7 +238,7 @@ export default defineEventHandler(async (event) => {
           ...(input.y !== undefined ? { y: input.y } : {}),
           ...(input.estado !== undefined ? { status: input.estado } : {}),
           updatedAt: new Date()
-        }).where(and(eq(locations.id, id), isNull(locations.archivedAt))).returning({ id: locations.id })
+        }).where(and(eq(locations.id, id), notDeleted(locations))).returning({ id: locations.id })
         requireRow(updated[0], 'actualizar la ubicación')
         return { success: true, data: { id: String(id) } }
       }
@@ -254,7 +254,7 @@ export default defineEventHandler(async (event) => {
           ...(input.alto !== undefined ? { height: input.alto } : {}),
           ...(input.color !== undefined ? { color: input.color } : {}),
           updatedAt: new Date()
-        }).where(and(eq(zones.id, zoneId), isNull(zones.archivedAt))).returning({ id: zones.id })
+        }).where(and(eq(zones.id, zoneId), notDeleted(zones))).returning({ id: zones.id })
         requireRow(updated[0], 'actualizar la zona')
         return { success: true, data: { id: zoneId } }
       }
@@ -262,7 +262,7 @@ export default defineEventHandler(async (event) => {
       case 'ventas': {
         const input = saleInput.parse(body)
         await db.transaction(async (tx) => {
-          const [old] = await tx.select().from(sales).where(eq(sales.id, id)).limit(1)
+          const [old] = await tx.select().from(sales).where(and(eq(sales.id, id), notDeleted(sales))).limit(1)
           const oldSale = requireRow(old, 'encontrar la venta')
           if (oldSale.status === 'Cancelada' || oldSale.status === 'Anulada') {
             throw createError({ statusCode: 409, statusMessage: 'Una venta cancelada o anulada no se puede editar.' })
@@ -277,7 +277,7 @@ export default defineEventHandler(async (event) => {
             })
           }
 
-          const currentItems = await tx.select().from(saleItems).where(and(eq(saleItems.saleId, id), isNull(saleItems.archivedAt)))
+          const currentItems = await tx.select().from(saleItems).where(and(eq(saleItems.saleId, id), notDeleted(saleItems)))
           const nextStatus = input.estado ?? oldSale.status
           const nextItems = input.items
             ? await priceSaleLines(tx, input.items.map(item => ({
@@ -295,8 +295,8 @@ export default defineEventHandler(async (event) => {
           let nextCustomer = input.cliente ?? oldSale.customer
           if (nextCustomerId !== null) {
             const [customer] = await tx.select({ id: customers.id, name: customers.name }).from(customers)
-              .where(and(eq(customers.id, nextCustomerId), isNull(customers.archivedAt))).limit(1)
-            if (!customer) throw createError({ statusCode: 400, statusMessage: 'El cliente no existe o está archivado.' })
+              .where(and(eq(customers.id, nextCustomerId), notDeleted(customers))).limit(1)
+            if (!customer) throw createError({ statusCode: 400, statusMessage: 'El cliente no existe o está eliminado.' })
             nextCustomer = customer.name
           }
 
@@ -319,8 +319,9 @@ export default defineEventHandler(async (event) => {
           await applyInventoryDelta(tx, deltas)
 
           if (input.items) {
-            await tx.update(saleItems).set({ archivedAt: new Date() })
-              .where(and(eq(saleItems.saleId, id), isNull(saleItems.archivedAt)))
+            const now = new Date()
+            await tx.update(saleItems).set({ deletedAt: now, archivedAt: now })
+              .where(and(eq(saleItems.saleId, id), notDeleted(saleItems)))
             for (const item of nextItems) {
               await tx.insert(saleItems).values({
                 saleId: id,

@@ -1,8 +1,9 @@
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import { getRouterParam } from 'h3'
 import { customers, products, saleItems, sales } from '../../../../../src/db/schema'
 import { useDrizzle } from '../../../../utils/drizzle'
 import { managementSections, parsePositiveId } from '../../../../utils/management'
+import { notDeleted } from '../../../../utils/soft-delete'
 
 export default defineEventHandler(async (event) => {
   const section = getRouterParam(event, 'section') ?? ''
@@ -31,9 +32,10 @@ export default defineEventHandler(async (event) => {
     customerAddress: customers.address,
     customerTaxId: customers.taxId,
     customerIvaCondition: sales.customerIvaCondition
-  }).from(sales).leftJoin(customers, eq(sales.customerId, customers.id)).where(eq(sales.id, id)).limit(1)
+  }).from(sales).leftJoin(customers, eq(sales.customerId, customers.id))
+    .where(and(eq(sales.id, id), notDeleted(sales))).limit(1)
 
-  if (!sale) throw createError({ statusCode: 404, statusMessage: 'Venta no encontrada.' })
+  if (!sale) throw createError({ statusCode: 404, statusMessage: 'Venta no encontrada o eliminada.' })
   if (sale.cae || sale.billingStatus === 'billed') {
     throw createError({ statusCode: 409, statusMessage: 'El comprobante fiscal emitido debe compartirse desde el sistema de facturación autorizado.' })
   }
@@ -46,7 +48,7 @@ export default defineEventHandler(async (event) => {
     price: saleItems.unitPrice,
     subtotal: sql<number>`${saleItems.quantity} * ${saleItems.unitPrice}`
   }).from(saleItems).leftJoin(products, eq(saleItems.productId, products.id))
-    .where(and(eq(saleItems.saleId, id), isNull(saleItems.archivedAt)))
+    .where(and(eq(saleItems.saleId, id), notDeleted(saleItems)))
 
   return {
     nonFiscal: true,

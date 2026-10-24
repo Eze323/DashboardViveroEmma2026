@@ -2,6 +2,7 @@ import { and, desc, gte, lte, notInArray, sql, sum } from 'drizzle-orm'
 import { getQuery } from 'h3'
 import { customers, products, sales } from '../../src/db/schema'
 import { useDrizzle } from '../utils/drizzle'
+import { notDeleted } from '../utils/soft-delete'
 
 function isValidDate(value: unknown): value is string {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
@@ -40,14 +41,14 @@ export default defineEventHandler(async (event) => {
   }
 
   const db = useDrizzle()
-  const rangeFilter = and(gte(sales.date, from), lte(sales.date, to), notInArray(sales.status, ['Anulada', 'Cancelada']))
+  const rangeFilter = and(gte(sales.date, from), lte(sales.date, to), notInArray(sales.status, ['Anulada', 'Cancelada']), notDeleted(sales))
   const monthStart = `${today.slice(0, 7)}-01`
   const [metrics, dailySales, recentSales] = await Promise.all([
     db.select({
-      todaySales: sql<number>`count(*) filter (where ${sales.date} = ${today} and ${sales.status} not in ('Anulada', 'Cancelada'))::int`,
-      products: sql<number>`(select count(*)::int from ${products} where archived_at is null)`,
-      monthlyRevenue: sql<number>`coalesce(sum(${sales.totalPrice}) filter (where ${sales.date} >= ${monthStart} and ${sales.date} <= ${today} and ${sales.status} not in ('Anulada', 'Cancelada')), 0)::float8`,
-      customers: sql<number>`(select count(*)::int from ${customers} where archived_at is null)`
+      todaySales: sql<number>`count(*) filter (where ${sales.date} = ${today} and ${sales.status} not in ('Anulada', 'Cancelada') and ${sales.deletedAt} is null)::int`,
+      products: sql<number>`(select count(*)::int from ${products} where ${products.deletedAt} is null and ${products.archivedAt} is null)`,
+      monthlyRevenue: sql<number>`coalesce(sum(${sales.totalPrice}) filter (where ${sales.date} >= ${monthStart} and ${sales.date} <= ${today} and ${sales.status} not in ('Anulada', 'Cancelada') and ${sales.deletedAt} is null), 0)::float8`,
+      customers: sql<number>`(select count(*)::int from ${customers} where ${customers.deletedAt} is null and ${customers.archivedAt} is null)`
     }).from(sales),
     db.select({
       date: sales.date,

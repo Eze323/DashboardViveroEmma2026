@@ -1,10 +1,11 @@
 import { getCookie, setCookie, setResponseHeader } from 'h3'
 import type { H3Event } from 'h3'
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import { compare } from 'bcryptjs'
 import { authLoginAttempts, users } from '../../src/db/schema'
 import { useDrizzle } from './drizzle'
 import { getServerEnvironment } from './server-environment'
+import { notDeleted } from './soft-delete'
 
 const AUTH_COOKIE = 'vivero_session'
 const SESSION_DURATION_SECONDS = 60 * 60 * 8
@@ -147,7 +148,7 @@ export async function verifyCredentials(event: H3Event, email: string, password:
       role: users.role
     })
     .from(users)
-    .where(sql`lower(${users.email}) = ${normalizedEmail}`)
+    .where(and(sql`lower(${users.email}) = ${normalizedEmail}`, notDeleted(users)))
     .limit(1)
 
   if (!user) return null

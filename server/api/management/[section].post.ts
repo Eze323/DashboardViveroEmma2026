@@ -5,6 +5,7 @@ import { customers, locations, plantPotPrices, products, purchases, saleItems, s
 import { useDrizzle } from '../../utils/drizzle'
 import { isUniqueConstraintError, managementSections } from '../../utils/management'
 import { priceSaleLines } from '../../utils/sale-pricing'
+import { notDeleted } from '../../utils/soft-delete'
 
 const positiveId = z.coerce.number().int().positive().safe()
 const money = z.coerce.number().finite().min(0).max(99999999.99)
@@ -155,12 +156,13 @@ export default defineEventHandler(async (event) => {
           let customerName = input.cliente
           if (customerId !== null) {
             const [customer] = await tx.select({ id: customers.id, name: customers.name }).from(customers)
-              .where(sql`${customers.id} = ${customerId} and ${customers.archivedAt} is null`).limit(1)
-            if (!customer) throw createError({ statusCode: 400, statusMessage: 'El cliente no existe o está archivado.' })
+              .where(sql`${customers.id} = ${customerId} and ${customers.deletedAt} is null and ${customers.archivedAt} is null`).limit(1)
+            if (!customer) throw createError({ statusCode: 400, statusMessage: 'El cliente no existe o está eliminado.' })
             customerName = customer.name
           }
 
-          const [user] = await tx.select({ id: users.id }).from(users).orderBy(users.id).limit(1)
+          const [user] = await tx.select({ id: users.id }).from(users)
+            .where(sql`${users.deletedAt} is null`).orderBy(users.id).limit(1)
           if (!user) throw createError({ statusCode: 503, statusMessage: 'No hay un usuario de sistema para registrar la venta.' })
 
           const now = new Date()
@@ -181,10 +183,10 @@ export default defineEventHandler(async (event) => {
               const updated = await tx.update(products).set({
                 stock: sql`${products.stock} - ${quantity}`,
                 updatedAt: now
-              }).where(sql`${products.id} = ${productId} and ${products.archivedAt} is null and ${products.stock} >= ${quantity}`).returning({ id: products.id })
+              }).where(sql`${products.id} = ${productId} and ${products.deletedAt} is null and ${products.archivedAt} is null and ${products.stock} >= ${quantity}`).returning({ id: products.id })
               if (updated.length === 0) {
                 const [product] = await tx.select({ name: products.name, stock: products.stock }).from(products).where(eq(products.id, productId)).limit(1)
-                if (!product) throw createError({ statusCode: 400, statusMessage: 'Uno de los productos no existe o está archivado.' })
+                if (!product) throw createError({ statusCode: 400, statusMessage: 'Uno de los productos no existe o está eliminado.' })
                 throw createError({ statusCode: 409, statusMessage: `Stock insuficiente para "${product.name}". Disponible: ${product.stock}.` })
               }
             }
@@ -226,9 +228,9 @@ export default defineEventHandler(async (event) => {
         const input = purchaseInput.parse(body)
         const purchase = await db.transaction(async (tx) => {
           const [product] = await tx.select({ id: products.id }).from(products)
-            .where(sql`${products.id} = ${input.productoId} and ${products.archivedAt} is null`).limit(1)
+            .where(sql`${products.id} = ${input.productoId} and ${products.deletedAt} is null and ${products.archivedAt} is null`).limit(1)
           const [supplier] = await tx.select({ id: suppliers.id }).from(suppliers)
-            .where(sql`${suppliers.id} = ${input.proveedorId} and ${suppliers.archivedAt} is null`).limit(1)
+            .where(sql`${suppliers.id} = ${input.proveedorId} and ${suppliers.deletedAt} is null and ${suppliers.archivedAt} is null`).limit(1)
           if (!product || !supplier) throw createError({ statusCode: 400, statusMessage: 'Selecciona un producto y proveedor activos.' })
 
           const created = requireRow((await tx.insert(purchases).values({

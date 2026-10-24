@@ -1,8 +1,9 @@
-import { and, asc, eq, isNull } from 'drizzle-orm'
+import { and, asc, eq } from 'drizzle-orm'
 import { getRouterParam } from 'h3'
 import { plantPotPrices, products } from '../../../../src/db/schema'
 import { useDrizzle } from '../../../utils/drizzle'
 import { parsePositiveId } from '../../../utils/management'
+import { notDeleted } from '../../../utils/soft-delete'
 
 export default defineEventHandler(async (event) => {
   const productId = parsePositiveId(getRouterParam(event, 'id'))
@@ -15,9 +16,9 @@ export default defineEventHandler(async (event) => {
     price: products.salePrice,
     potSize: products.potSize,
     imageUrl: products.imageUrl
-  }).from(products).where(and(eq(products.id, productId), isNull(products.archivedAt))).limit(1)
+  }).from(products).where(and(eq(products.id, productId), notDeleted(products))).limit(1)
 
-  if (!product) throw createError({ statusCode: 404, statusMessage: 'Producto no encontrado o archivado.' })
+  if (!product) throw createError({ statusCode: 404, statusMessage: 'Producto no encontrado o eliminado.' })
 
   const variants = await db.select({
     id: plantPotPrices.id,
@@ -25,7 +26,7 @@ export default defineEventHandler(async (event) => {
     price: plantPotPrices.price
   }).from(plantPotPrices).where(and(
     eq(plantPotPrices.productId, productId),
-    isNull(plantPotPrices.archivedAt)
+    notDeleted(plantPotPrices)
   )).orderBy(asc(plantPotPrices.potSize), asc(plantPotPrices.id))
 
   return {

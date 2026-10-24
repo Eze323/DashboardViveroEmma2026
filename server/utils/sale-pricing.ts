@@ -1,6 +1,7 @@
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import { plantPotPrices, products } from '../../src/db/schema'
 import type { useDrizzle } from './drizzle'
+import { notDeleted } from './soft-delete'
 
 type Transaction = Parameters<Parameters<ReturnType<typeof useDrizzle>['transaction']>[0]>[0]
 
@@ -25,18 +26,18 @@ export async function priceSaleLines(tx: Transaction, items: SaleLineInput[]): P
       name: products.name,
       salePrice: products.salePrice,
       potSize: products.potSize
-    }).from(products).where(and(eq(products.id, item.productId), isNull(products.archivedAt))).limit(1)
-    if (!product) throw createError({ statusCode: 400, statusMessage: 'Uno de los productos no existe o está archivado.' })
+    }).from(products).where(and(eq(products.id, item.productId), notDeleted(products))).limit(1)
+    if (!product) throw createError({ statusCode: 400, statusMessage: 'Uno de los productos no existe o está eliminado.' })
 
     const [variant] = item.potSize
       ? await tx.select({ price: plantPotPrices.price }).from(plantPotPrices).where(and(
           eq(plantPotPrices.productId, item.productId),
           eq(plantPotPrices.potSize, item.potSize),
-          isNull(plantPotPrices.archivedAt)
+          notDeleted(plantPotPrices)
         )).limit(1)
       : []
     const [variantCount] = await tx.select({ total: sql<number>`count(*)::int` }).from(plantPotPrices)
-      .where(and(eq(plantPotPrices.productId, item.productId), isNull(plantPotPrices.archivedAt)))
+      .where(and(eq(plantPotPrices.productId, item.productId), notDeleted(plantPotPrices)))
 
     if (item.potSize && !variant && (variantCount?.total ?? 0) > 0) {
       throw createError({ statusCode: 400, statusMessage: `El tamaño "${item.potSize}" no tiene un precio activo para "${product.name}".` })

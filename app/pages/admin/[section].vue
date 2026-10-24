@@ -493,7 +493,7 @@ function resetForm(record?: ManagementRow) {
 }
 
 async function loadFormOptions() {
-  const [productsResponse, suppliersResponse, customersResponse] = await Promise.all([
+  const [productsResponse, suppliersResponse, customersResponse, sessionResponse] = await Promise.all([
     ['compras', 'precios-proveedor', 'precios-maceta'].includes(section.value)
       ? $fetch<ManagementApiResponse>('/api/management/productos?limit=100')
       : Promise.resolve(null),
@@ -502,8 +502,14 @@ async function loadFormOptions() {
       : Promise.resolve(null),
     section.value === 'ventas'
       ? $fetch<ManagementApiResponse>('/api/management/clientes?limit=100')
+      : Promise.resolve(null),
+    section.value === 'ventas'
+      ? $fetch<{ user: { name: string } | null }>('/api/auth/session')
       : Promise.resolve(null)
   ])
+  if (section.value === 'ventas' && !editingRecord.value && sessionResponse?.user) {
+    salesDraftStore.draft.seller = sessionResponse.user.name
+  }
   productOptions.value = (productsResponse?.data ?? []).map(row => ({
     label: `${recordValue(row.nombre)} · ${recordValue(row.sku)}`,
     value: row.id
@@ -1135,6 +1141,8 @@ function visibleCardFields(row: ManagementRow) {
           :key="saleComposerKey"
           v-model="salesDraftStore.draft"
           :customers="customerOptions"
+          :allow-new-customer="!editingRecord"
+          :is-editing="Boolean(editingRecord)"
         />
 
         <template v-else>

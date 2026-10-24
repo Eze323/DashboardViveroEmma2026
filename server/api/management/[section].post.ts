@@ -77,6 +77,11 @@ const zoneInput = z.object({
 const saleInput = z.object({
   clienteId: positiveId.optional().nullable(),
   cliente: z.string().trim().min(1).max(255).default('Consumidor Final'),
+  clienteNuevo: z.object({
+    nombre: z.string().trim().min(1).max(255),
+    email: z.union([z.string().trim().email().max(255), z.literal('')]).optional(),
+    telefono: z.string().trim().max(20).optional()
+  }).optional(),
   vendedor: z.string().trim().min(1).max(255).default('Panel de gestión'),
   fecha: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   estado: z.enum(['Completada', 'Pendiente']).default('Completada'),
@@ -185,24 +190,45 @@ export default defineEventHandler(async (event) => {
 
       case 'ventas': {
         const input = saleInput.parse(body)
+        const actor = requireRole(event, 'admin', 'encargado', 'vendedor')
         const totalsByProduct = new Map<number, number>()
         for (const item of input.items) {
           totalsByProduct.set(item.productoId, (totalsByProduct.get(item.productoId) ?? 0) + item.cantidad)
         }
 
         const sale = await db.transaction(async (tx) => {
-          const customerId = input.clienteId ?? null
+          let customerId = input.clienteId ?? null
           let customerName = input.cliente
-          if (customerId !== null) {
+          let createdCustomer: { id: number, name: string } | null = null
+          if (input.clienteNuevo) {
+            const normalizedName = input.clienteNuevo.nombre.trim()
+            await tx.execute(sql`select pg_advisory_xact_lock(hashtext(lower(${normalizedName})))`)
+            const [existingCustomer] = await tx.select({
+              id: customers.id,
+              name: customers.name
+            }).from(customers)
+              .where(sql`lower(btrim(${customers.name})) = lower(${normalizedName}) and ${customers.deletedAt} is null and ${customers.archivedAt} is null`)
+              .limit(1)
+
+            if (existingCustomer) {
+              customerId = Number(existingCustomer.id)
+              customerName = existingCustomer.name
+            } else {
+              const insertedCustomer = requireRow((await tx.insert(customers).values({
+                name: normalizedName,
+                email: input.clienteNuevo.email || null,
+                phone: input.clienteNuevo.telefono || null
+              }).returning({ id: customers.id, name: customers.name }))[0], 'crear el cliente de la venta')
+              customerId = Number(insertedCustomer.id)
+              customerName = insertedCustomer.name
+              createdCustomer = { id: customerId, name: customerName }
+            }
+          } else if (customerId !== null) {
             const [customer] = await tx.select({ id: customers.id, name: customers.name }).from(customers)
               .where(sql`${customers.id} = ${customerId} and ${customers.deletedAt} is null and ${customers.archivedAt} is null`).limit(1)
             if (!customer) throw createError({ statusCode: 400, statusMessage: 'El cliente no existe o está eliminado.' })
             customerName = customer.name
           }
-
-          const [user] = await tx.select({ id: users.id }).from(users)
-            .where(sql`${users.deletedAt} is null`).orderBy(users.id).limit(1)
-          if (!user) throw createError({ statusCode: 503, statusMessage: 'No hay un usuario de sistema para registrar la venta.' })
 
           const now = new Date()
           const appliesInventory = input.estado === 'Completada'
@@ -232,10 +258,10 @@ export default defineEventHandler(async (event) => {
           }
 
           const created = requireRow((await tx.insert(sales).values({
-            userId: user.id,
+            userId: actor.id,
             customerId,
             customer: customerName,
-            seller: input.vendedor,
+            seller: actor.name,
             date: input.fecha,
             status: input.estado,
             totalPrice: total.toFixed(2),
@@ -258,8 +284,20 @@ export default defineEventHandler(async (event) => {
               potSize: item.potSize
             })
           }
-          return { ...created, total }
+          return { ...created, total, createdCustomer }
         })
+        if (sale.createdCustomer) {
+          await logAuditEvent(event, {
+            action: 'CUSTOMER_CREATED',
+            entity: 'customers',
+            entityId: String(sale.createdCustomer.id),
+            details: {
+              before: null,
+              after: sale.createdCustomer,
+              createdDuringSale: sale.id
+            }
+          })
+        }
         await logAuditEvent(event, {
           action: input.estado === 'Completada' ? 'STOCK_ADJUSTED' : 'SALE_CREATED',
           entity: 'sales',

@@ -8,8 +8,15 @@ export interface SaleDraftLine {
   quantity: number
 }
 
+export interface SaleDraftCustomer {
+  nombre: string
+  email: string
+  telefono: string
+}
+
 export interface SaleDraft {
   customerId: string
+  newCustomer?: SaleDraftCustomer
   date: string
   seller: string
   status: 'Completada' | 'Pendiente'
@@ -60,7 +67,7 @@ function emptyDraft(): SaleDraft {
   return {
     customerId: 'consumer-final',
     date: today(),
-    seller: 'Panel de gestión',
+    seller: '',
     status: 'Completada',
     lines: []
   }
@@ -302,9 +309,13 @@ export const useSalesDraftStore = defineStore('sales-draft', () => {
   function payload(customerName: string) {
     return {
       clienteId: draft.value.customerId && draft.value.customerId !== 'consumer-final'
+        && draft.value.customerId !== 'new-customer'
         ? Number(draft.value.customerId)
         : null,
-      cliente: customerName || 'Consumidor Final',
+      cliente: draft.value.newCustomer?.nombre || customerName || 'Consumidor Final',
+      ...(draft.value.customerId === 'new-customer' && draft.value.newCustomer
+        ? { clienteNuevo: draft.value.newCustomer }
+        : {}),
       fecha: draft.value.date,
       vendedor: draft.value.seller,
       estado: draft.value.status,

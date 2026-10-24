@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { SaleCatalogProduct, SaleDraft, SaleDraftLine } from '~/stores/salesDraft'
+import type { SaleCatalogProduct, SaleDraft, SaleDraftCustomer, SaleDraftLine } from '~/stores/salesDraft'
 import { useSalesDraftStore } from '~/stores/salesDraft'
 
 interface CustomerOption {
@@ -9,6 +9,8 @@ interface CustomerOption {
 
 const props = defineProps<{
   customers: CustomerOption[]
+  allowNewCustomer?: boolean
+  isEditing?: boolean
 }>()
 
 const draft = defineModel<SaleDraft>({ required: true })
@@ -18,6 +20,38 @@ const searchInput = ref('')
 const search = ref('')
 const searchErrorMessage = ref('')
 const productRequest = ref(0)
+const customerModalOpen = ref(false)
+const customerForm = reactive<SaleDraftCustomer>({ nombre: '', email: '', telefono: '' })
+const customerOptions = computed(() => [
+  ...props.customers,
+  ...(draft.value.newCustomer
+    ? [{ label: draft.value.newCustomer.nombre, value: 'new-customer' }]
+    : [])
+])
+
+function selectCustomer(value: unknown) {
+  draft.value.customerId = String(value)
+  if (draft.value.customerId !== 'new-customer') draft.value.newCustomer = undefined
+}
+
+function openCustomerForm() {
+  customerForm.nombre = ''
+  customerForm.email = ''
+  customerForm.telefono = ''
+  customerModalOpen.value = true
+}
+
+function selectNewCustomer() {
+  const nombre = customerForm.nombre.trim()
+  if (!nombre) return
+  draft.value.newCustomer = {
+    nombre,
+    email: customerForm.email.trim(),
+    telefono: customerForm.telefono.trim()
+  }
+  draft.value.customerId = 'new-customer'
+  customerModalOpen.value = false
+}
 
 watchDebounced(searchInput, async (value) => {
   search.value = value.trim()
@@ -74,19 +108,97 @@ function addQuantity(line: SaleDraftLine) {
 <template>
   <div class="space-y-4">
     <section class="grid gap-3 sm:grid-cols-2">
-      <UFormField label="Cliente">
-        <USelect v-model="draft.customerId" :items="props.customers" class="w-full" />
+      <UFormField
+        label="Cliente"
+      >
+        <div class="flex gap-2">
+          <USelect
+            :model-value="draft.customerId"
+            :items="customerOptions"
+            class="w-full"
+            @update:model-value="selectCustomer"
+          />
+          <UButton
+            v-if="props.allowNewCustomer"
+            icon="i-lucide-user-plus"
+            label="Nuevo"
+            color="neutral"
+            variant="subtle"
+            class="min-h-11 shrink-0"
+            @click="openCustomerForm"
+          />
+        </div>
+        <p v-if="draft.newCustomer && draft.customerId === 'new-customer'" class="mt-1 text-xs text-muted">
+          Si ya existe un cliente con ese nombre, se usará el registro existente.
+        </p>
       </UFormField>
       <UFormField label="Fecha de venta" required>
         <UInput v-model="draft.date" type="date" class="w-full" />
       </UFormField>
       <UFormField label="Vendedor" required>
-        <UInput v-model="draft.seller" maxlength="255" class="w-full" />
+        <UInput
+          v-model="draft.seller"
+          maxlength="255"
+          :disabled="!props.isEditing"
+          class="w-full"
+        />
       </UFormField>
       <UFormField label="Estado">
         <USelect v-model="draft.status" :items="['Completada', 'Pendiente']" class="w-full" />
       </UFormField>
     </section>
+
+    <UModal v-model:open="customerModalOpen" title="Agregar cliente a la venta">
+      <template #body>
+        <div class="space-y-4">
+          <UFormField
+            label="Nombre"
+            required
+          >
+            <UInput
+              v-model="customerForm.nombre"
+              maxlength="255"
+              required
+              autofocus
+              class="w-full"
+            />
+          </UFormField>
+          <UFormField label="Correo electrónico">
+            <UInput
+              v-model="customerForm.email"
+              type="email"
+              maxlength="255"
+              class="w-full"
+            />
+          </UFormField>
+          <UFormField label="Teléfono">
+            <UInput
+              v-model="customerForm.telefono"
+              maxlength="20"
+              class="w-full"
+            />
+          </UFormField>
+          <p class="text-sm text-muted">
+            Se guardará junto con la venta. Si ya existe un cliente con ese nombre, no se duplicará.
+          </p>
+          <div class="grid grid-cols-2 gap-2 border-t border-default pt-4">
+            <UButton
+              label="Cancelar"
+              color="neutral"
+              variant="subtle"
+              class="min-h-11"
+              @click="customerModalOpen = false"
+            />
+            <UButton
+              label="Usar cliente"
+              :disabled="!customerForm.nombre.trim()"
+              class="min-h-11"
+              @click="selectNewCustomer"
+            />
+          </div>
+        </div>
+      </template>
+    </UModal>
 
     <UAlert
       color="neutral"

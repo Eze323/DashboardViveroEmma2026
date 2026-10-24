@@ -6,8 +6,8 @@ export interface ManagementRow {
 export interface ManagementField {
   key: string
   label: string
-  type?: 'text' | 'email' | 'number' | 'date' | 'datetime-local' | 'select'
-  options?: string[]
+  type?: 'text' | 'email' | 'password' | 'number' | 'date' | 'datetime-local' | 'select'
+  options?: Array<string | { label: string, value: string }>
   format?: 'currency'
   required?: boolean
   readonly?: boolean
@@ -272,9 +272,18 @@ export const viveroModules: Record<ViveroSection, ManagementModule> = {
     fields: [
       { key: 'nombre', label: 'Nombre', required: true },
       { key: 'email', label: 'Correo electrónico', type: 'email', required: true },
-      { key: 'rol', label: 'Rol', type: 'select', options: ['Administrador', 'Encargado', 'Vendedor'] },
-      { key: 'ultimoAcceso', label: 'Último acceso' },
-      { key: 'estado', label: 'Estado', type: 'select', options: ['Activo', 'Invitación pendiente', 'Suspendido'] }
+      {
+        key: 'rol',
+        label: 'Rol',
+        type: 'select',
+        required: true,
+        options: [
+          { label: 'Administrador', value: 'admin' },
+          { label: 'Encargado', value: 'encargado' },
+          { label: 'Vendedor', value: 'vendedor' }
+        ]
+      },
+      { key: 'password', label: 'Contraseña', type: 'password', help: 'Mínimo 12 caracteres. Déjala vacía al editar para conservar la actual.' }
     ],
     rows: [
       { id: 'USR-01', nombre: 'Vivero Emma', email: 'admin@viveroemma.com', rol: 'Administrador', ultimoAcceso: 'Hoy, 09:42', estado: 'Activo' },

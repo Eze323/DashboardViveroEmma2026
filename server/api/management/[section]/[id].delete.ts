@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import { getRouterParam } from 'h3'
 import {
   customers,
@@ -14,6 +14,8 @@ import {
   zones
 } from '../../../../src/db/schema'
 import { useDrizzle } from '../../../utils/drizzle'
+import { requireRole } from '../../../utils/auth'
+import { logAuditEvent } from '../../../utils/audit'
 import { managementSections, parsePositiveId } from '../../../utils/management'
 import { notDeleted } from '../../../utils/soft-delete'
 
@@ -26,6 +28,7 @@ export default defineEventHandler(async (event) => {
   if (!managementSections.includes(section as typeof managementSections[number])) {
     throw createError({ statusCode: 404, statusMessage: 'La sección solicitada no existe.' })
   }
+  if (section === 'accesos' || section === 'productos') requireRole(event, 'admin')
   const routeId = getRouterParam(event, 'id')
   const id = section === 'zonas' ? 0 : parsePositiveId(routeId)
   const db = useDrizzle()
@@ -33,6 +36,15 @@ export default defineEventHandler(async (event) => {
 
   switch (section) {
     case 'productos': {
+      const [before] = await db.select({
+        id: products.id,
+        name: products.name,
+        category: products.category,
+        stock: products.stock,
+        salePrice: products.salePrice,
+        published: products.published
+      }).from(products).where(and(eq(products.id, id), notDeleted(products))).limit(1)
+      requireAffected(before ? 1 : 0)
       // Transacción ACID: Elimina lógicamente el producto y sus precios derivados asociados
       await db.transaction(async (tx) => {
         const rows = await tx.update(products)
@@ -49,6 +61,12 @@ export default defineEventHandler(async (event) => {
         await tx.update(supplierPrices)
           .set({ deletedAt, archivedAt: deletedAt })
           .where(and(eq(supplierPrices.productId, id), notDeleted(supplierPrices)))
+      })
+      await logAuditEvent(event, {
+        action: 'PRODUCT_DELETED',
+        entity: 'products',
+        entityId: String(id),
+        details: { before, after: { ...before, deletedAt } }
       })
       break
     }
@@ -116,27 +134,62 @@ export default defineEventHandler(async (event) => {
     }
 
     case 'accesos': {
+      const [before] = await db.select({
+        id: users.id,
+        name: users.name,
+        email: users.email,
+        role: users.role
+      }).from(users).where(and(eq(users.id, id), notDeleted(users))).limit(1)
+      if (!before) {
+        throw createError({ statusCode: 404, statusMessage: 'No se encontró un registro activo para eliminar.' })
+      }
+      if (Number(before.id) === event.context.user?.id) {
+        throw createError({ statusCode: 409, statusMessage: 'No puedes eliminar tu propio usuario administrador.' })
+      }
+      if (before.role === 'admin') {
+        const [activeAdmins] = await db.select({
+          total: sql<number>`count(*)::int`
+        }).from(users).where(and(eq(users.role, 'admin'), notDeleted(users)))
+        if ((activeAdmins?.total ?? 0) <= 1) {
+          throw createError({ statusCode: 409, statusMessage: 'No se puede eliminar el único usuario administrador activo.' })
+        }
+      }
       const rows = await db.update(users)
         .set({ deletedAt })
         .where(and(eq(users.id, id), notDeleted(users)))
         .returning({ id: users.id })
       requireAffected(rows.length)
+      await logAuditEvent(event, {
+        action: 'USER_DELETED',
+        entity: 'users',
+        entityId: String(id),
+        details: { before, after: { ...before, deletedAt } }
+      })
       break
     }
 
     case 'compras': {
       // Transacción ACID: Revertir stock del producto de forma atómica y marcar la compra como eliminada
-      await db.transaction(async (tx) => {
+      const change = await db.transaction(async (tx) => {
         const [purchase] = await tx.select().from(purchases)
           .where(and(eq(purchases.id, id), notDeleted(purchases))).limit(1)
         if (!purchase) throw createError({ statusCode: 404, statusMessage: 'No se encontró una compra activa para eliminar.' })
 
-        const updated = await tx.update(products).set({
+        const [stockBefore] = await tx.select({
+          id: products.id,
+          stock: products.stock
+        }).from(products).where(eq(products.id, purchase.productId)).limit(1)
+        if (!stockBefore) throw createError({ statusCode: 409, statusMessage: 'No se encontró el producto asociado a la compra.' })
+
+        const [stockAfter] = await tx.update(products).set({
           stock: sql`${products.stock} - ${purchase.quantity}`,
           updatedAt: deletedAt
-        }).where(sql`${products.id} = ${purchase.productId} and ${products.stock} >= ${purchase.quantity}`).returning({ id: products.id })
+        }).where(sql`${products.id} = ${purchase.productId} and ${products.stock} >= ${purchase.quantity}`).returning({
+          id: products.id,
+          stock: products.stock
+        })
 
-        if (updated.length === 0) {
+        if (!stockAfter) {
           throw createError({
             statusCode: 409,
             statusMessage: 'No se puede eliminar esta compra porque el stock actual ya no alcanza para revertirla.'
@@ -146,13 +199,34 @@ export default defineEventHandler(async (event) => {
         await tx.update(purchases)
           .set({ deletedAt, archivedAt: deletedAt })
           .where(eq(purchases.id, id))
+        return {
+          before: {
+            id: purchase.id,
+            productId: purchase.productId,
+            quantity: purchase.quantity,
+            purchasePrice: purchase.purchasePrice,
+            purchaseDate: purchase.purchaseDate
+          },
+          after: { deletedAt },
+          inventoryAdjustment: {
+            productId: purchase.productId,
+            stockBefore: stockBefore.stock,
+            stockAfter: stockAfter.stock
+          }
+        }
+      })
+      await logAuditEvent(event, {
+        action: 'STOCK_ADJUSTED',
+        entity: 'purchases',
+        entityId: String(id),
+        details: change
       })
       break
     }
 
     case 'ventas': {
       // Transacción ACID: Revertir stock de los productos vendidos y soft delete de la venta
-      await db.transaction(async (tx) => {
+      const change = await db.transaction(async (tx) => {
         const [sale] = await tx.select().from(sales)
           .where(and(eq(sales.id, id), notDeleted(sales))).limit(1)
         if (!sale) throw createError({ statusCode: 404, statusMessage: 'No se encontró una venta activa.' })
@@ -164,6 +238,7 @@ export default defineEventHandler(async (event) => {
           throw createError({ statusCode: 409, statusMessage: 'La venta ya fue cancelada y eliminada.' })
         }
 
+        const inventoryAdjustments: Array<{ productId: number, quantity: number }> = []
         if (sale.inventoryAppliedAt !== null) {
           const items = await tx.select({ productId: saleItems.productId, quantity: saleItems.quantity })
             .from(saleItems).where(and(eq(saleItems.saleId, id), notDeleted(saleItems)))
@@ -173,6 +248,7 @@ export default defineEventHandler(async (event) => {
               stock: sql`${products.stock} + ${item.quantity}`,
               updatedAt: deletedAt
             }).where(eq(products.id, item.productId))
+            inventoryAdjustments.push(item)
           }
         }
 
@@ -182,12 +258,37 @@ export default defineEventHandler(async (event) => {
           .where(eq(saleItems.saleId, id))
 
         // Soft delete de la venta
-        await tx.update(sales).set({
+        const [updatedSale] = await tx.update(sales).set({
           status: 'Cancelada',
           deletedAt,
           inventoryAppliedAt: null,
           updatedAt: deletedAt
-        }).where(eq(sales.id, id))
+        }).where(eq(sales.id, id)).returning({
+          id: sales.id,
+          status: sales.status,
+          totalPrice: sales.totalPrice,
+          deletedAt: sales.deletedAt,
+          inventoryAppliedAt: sales.inventoryAppliedAt
+        })
+        if (!updatedSale) {
+          throw createError({ statusCode: 404, statusMessage: 'No se encontró una venta activa.' })
+        }
+        return {
+          before: {
+            id: sale.id,
+            status: sale.status,
+            totalPrice: sale.totalPrice,
+            inventoryAppliedAt: sale.inventoryAppliedAt
+          },
+          after: updatedSale,
+          inventoryAdjustments
+        }
+      })
+      await logAuditEvent(event, {
+        action: change.inventoryAdjustments.length ? 'STOCK_ADJUSTED' : 'SALE_CANCELLED',
+        entity: 'sales',
+        entityId: String(id),
+        details: change
       })
       break
     }

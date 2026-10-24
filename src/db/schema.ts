@@ -5,6 +5,7 @@ import {
   date,
   decimal,
   integer,
+  jsonb,
   pgEnum,
   pgTable,
   text,
@@ -13,7 +14,7 @@ import {
   varchar
 } from 'drizzle-orm/pg-core'
 
-export const roleEnum = pgEnum('role', ['admin', 'encargado', 'operario', 'user'])
+export const roleEnum = pgEnum('role', ['admin', 'encargado', 'vendedor', 'operario', 'user'])
 
 export const products = pgTable('products', {
   id: bigserial('id', { mode: 'number' }).primaryKey(),
@@ -167,4 +168,15 @@ export const authLoginAttempts = pgTable('auth_login_attempts', {
   windowStartedAt: timestamp('window_started_at', { mode: 'date' }).notNull().defaultNow(),
   lockedUntil: timestamp('locked_until', { mode: 'date' }),
   updatedAt: timestamp('updated_at', { mode: 'date' }).notNull().defaultNow()
+})
+
+export const auditLogs = pgTable('audit_logs', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  userId: bigint('user_id', { mode: 'number' }).notNull().references(() => users.id),
+  action: varchar('action', { length: 100 }).notNull(),
+  entity: varchar('entity', { length: 100 }).notNull(),
+  entityId: varchar('entity_id', { length: 255 }).notNull(),
+  details: jsonb('details').$type<Record<string, unknown>>().notNull().default({}),
+  ipAddress: varchar('ip_address', { length: 45 }),
+  createdAt: timestamp('created_at').notNull().defaultNow()
 })

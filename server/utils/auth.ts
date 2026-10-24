@@ -17,7 +17,7 @@ export interface AuthUser {
   id: number
   name: string
   email: string
-  role: 'admin' | 'encargado' | 'operario' | 'user' | null
+  role: 'admin' | 'encargado' | 'vendedor' | 'operario' | 'user' | null
 }
 
 interface SessionPayload {
@@ -28,7 +28,24 @@ interface SessionPayload {
 }
 
 export function canAccessPanel(role: AuthUser['role']): boolean {
-  return role === 'admin' || role === 'encargado'
+  return role === 'admin' || role === 'encargado' || role === 'vendedor'
+}
+
+export function requireRole(event: H3Event, ...allowedRoles: NonNullable<AuthUser['role']>[]): AuthUser {
+  const user = event.context.user
+  if (!user) {
+    throw createError({
+      statusCode: 401,
+      statusMessage: 'Debes iniciar sesión para continuar.'
+    })
+  }
+  if (!user.role || !allowedRoles.includes(user.role)) {
+    throw createError({
+      statusCode: 403,
+      statusMessage: 'Tu cuenta no tiene permisos para esta operación.'
+    })
+  }
+  return user
 }
 
 function getSessionSecret(event: H3Event): string {
@@ -181,8 +198,8 @@ export async function setAuthSession(event: H3Event, user: AuthUser): Promise<vo
 
   setCookie(event, AUTH_COOKIE, `${encodedPayload}.${signature}`, {
     httpOnly: true,
-    secure: !import.meta.dev,
-    sameSite: 'strict',
+    secure: getServerEnvironment().NODE_ENV === 'production',
+    sameSite: 'lax',
     path: '/',
     maxAge: SESSION_DURATION_SECONDS
   })
@@ -191,20 +208,15 @@ export async function setAuthSession(event: H3Event, user: AuthUser): Promise<vo
 export function clearAuthSession(event: H3Event): void {
   setCookie(event, AUTH_COOKIE, '', {
     httpOnly: true,
-    secure: !import.meta.dev,
-    sameSite: 'strict',
+    secure: getServerEnvironment().NODE_ENV === 'production',
+    sameSite: 'lax',
     path: '/',
     maxAge: 0
   })
 }
 
 export async function getAuthSession(event: H3Event): Promise<SessionPayload | null> {
-  let secret: string
-  try {
-    secret = getSessionSecret(event)
-  } catch {
-    return null
-  }
+  const secret = getSessionSecret(event)
 
   const token = getCookie(event, AUTH_COOKIE)
   if (!token) return null
@@ -246,15 +258,28 @@ export async function getAuthSession(event: H3Event): Promise<SessionPayload | n
     && typeof payload.email === 'string'
     && payload.email.length > 0
     && 'role' in payload
-    && (payload.role === 'admin' || payload.role === 'encargado' || payload.role === 'operario' || payload.role === 'user' || payload.role === null)
+    && (payload.role === 'admin' || payload.role === 'encargado' || payload.role === 'vendedor' || payload.role === 'operario' || payload.role === 'user' || payload.role === null)
     && 'expiresAt' in payload
     && typeof payload.expiresAt === 'number'
     && payload.expiresAt > Date.now()
   ) {
+    const [user] = await useDrizzle().select({
+      id: users.id,
+      name: users.name,
+      email: users.email,
+      role: users.role
+    }).from(users)
+      .where(and(eq(users.id, payload.userId), sql`${users.deletedAt} is null`))
+      .limit(1)
+    if (!user) return null
+
+    const id = Number(user.id)
+    if (!Number.isSafeInteger(id) || id <= 0) return null
+    event.context.user = { id, name: user.name, email: user.email, role: user.role }
     return {
       userId: payload.userId,
-      email: payload.email,
-      role: payload.role,
+      email: user.email,
+      role: user.role,
       expiresAt: payload.expiresAt
     }
   }

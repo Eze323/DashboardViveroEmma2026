@@ -1,11 +1,13 @@
 import { eq, sql } from 'drizzle-orm'
 import { getRouterParam, readBody } from 'h3'
 import { z } from 'zod'
+import { hash } from 'bcryptjs'
 import { customers, locations, plantPotPrices, products, purchases, saleItems, sales, supplierPrices, suppliers, users, zones } from '../../../src/db/schema'
 import { useDrizzle } from '../../utils/drizzle'
+import { requireRole } from '../../utils/auth'
+import { logAuditEvent } from '../../utils/audit'
 import { isUniqueConstraintError, managementSections } from '../../utils/management'
 import { priceSaleLines } from '../../utils/sale-pricing'
-import { notDeleted } from '../../utils/soft-delete'
 
 const positiveId = z.coerce.number().int().positive().safe()
 const money = z.coerce.number().finite().min(0).max(99999999.99)
@@ -49,6 +51,12 @@ const plantPriceInput = z.object({
   productoId: positiveId,
   medida: z.string().trim().min(1).max(50),
   precio: money
+})
+const userInput = z.object({
+  nombre: z.string().trim().min(1).max(255),
+  email: z.string().trim().email().max(255),
+  rol: z.enum(['admin', 'encargado', 'vendedor', 'operario', 'user']),
+  password: z.string().min(12).max(1024)
 })
 const locationInput = z.object({
   nombre: z.string().trim().min(1).max(255),
@@ -98,6 +106,7 @@ export default defineEventHandler(async (event) => {
   if (!managementSections.includes(section as typeof managementSections[number])) {
     throw createError({ statusCode: 404, statusMessage: 'La sección solicitada no existe.' })
   }
+  if (section === 'accesos') requireRole(event, 'admin')
   const body: unknown = await readBody(event)
   const db = useDrizzle()
 
@@ -121,7 +130,37 @@ export default defineEventHandler(async (event) => {
           const sku = `VE-${String(inserted.id).padStart(6, '0')}`
           return requireRow((await tx.update(products).set({ sku }).where(eq(products.id, inserted.id)).returning())[0], 'asignar el SKU')
         })
+        await logAuditEvent(event, {
+          action: 'PRODUCT_CREATED',
+          entity: 'products',
+          entityId: String(product.id),
+          details: { before: null, after: product }
+        })
         return { success: true, data: { id: String(product.id), sku: product.sku } }
+      }
+
+      case 'accesos': {
+        const input = userInput.parse(body)
+        const password = await hash(input.password, 12)
+        const user = requireRow((await db.insert(users).values({
+          name: input.nombre,
+          email: input.email.toLowerCase(),
+          password,
+          role: input.rol,
+          createdAt: new Date()
+        }).returning({
+          id: users.id,
+          name: users.name,
+          email: users.email,
+          role: users.role
+        }))[0], 'crear el usuario')
+        await logAuditEvent(event, {
+          action: 'USER_CREATED',
+          entity: 'users',
+          entityId: String(user.id),
+          details: { before: null, after: user }
+        })
+        return { success: true, data: { id: String(user.id) } }
       }
 
       case 'clientes': {
@@ -221,6 +260,16 @@ export default defineEventHandler(async (event) => {
           }
           return { ...created, total }
         })
+        await logAuditEvent(event, {
+          action: input.estado === 'Completada' ? 'STOCK_ADJUSTED' : 'SALE_CREATED',
+          entity: 'sales',
+          entityId: String(sale.id),
+          details: {
+            before: null,
+            after: { id: sale.id, total: sale.total, status: input.estado, items: input.items },
+            inventoryAdjusted: input.estado === 'Completada'
+          }
+        })
         return { success: true, data: { id: String(sale.id), total: sale.total } }
       }
 
@@ -245,6 +294,23 @@ export default defineEventHandler(async (event) => {
             updatedAt: new Date()
           }).where(eq(products.id, input.productoId))
           return created
+        })
+        await logAuditEvent(event, {
+          action: 'STOCK_ADJUSTED',
+          entity: 'purchases',
+          entityId: String(purchase.id),
+          details: {
+            before: null,
+            after: {
+              id: purchase.id,
+              productId: input.productoId,
+              supplierId: input.proveedorId,
+              quantity: input.cantidad,
+              purchasePrice: input.precio,
+              purchaseDate: input.fecha
+            },
+            inventoryAdjustment: { productId: input.productoId, quantity: input.cantidad }
+          }
         })
         return { success: true, data: { id: String(purchase.id) } }
       }

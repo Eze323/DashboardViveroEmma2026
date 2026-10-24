@@ -14,6 +14,7 @@ import {
   zones
 } from '../../../src/db/schema'
 import { useDrizzle } from '../../utils/drizzle'
+import { requireRole } from '../../utils/auth'
 import { managementSections, paginationMeta, parseManagementQuery } from '../../utils/management'
 import { notDeleted, softDeleteFilter } from '../../utils/soft-delete'
 
@@ -22,6 +23,7 @@ export default defineEventHandler(async (event) => {
   if (!managementSections.includes(section as typeof managementSections[number])) {
     throw createError({ statusCode: 404, statusMessage: 'La sección solicitada no existe.' })
   }
+  if (section === 'accesos') requireRole(event, 'admin')
 
   const query = parseManagementQuery(event)
   const db = useDrizzle()

@@ -1,4 +1,4 @@
-import { and, eq, isNotNull, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import { getRouterParam } from 'h3'
 import {
   customers,
@@ -14,6 +14,8 @@ import {
   zones
 } from '../../../../../src/db/schema'
 import { useDrizzle } from '../../../../utils/drizzle'
+import { requireRole } from '../../../../utils/auth'
+import { logAuditEvent } from '../../../../utils/audit'
 import { managementSections, parsePositiveId } from '../../../../utils/management'
 import { isDeleted } from '../../../../utils/soft-delete'
 
@@ -22,6 +24,7 @@ export default defineEventHandler(async (event) => {
   if (!managementSections.includes(section as typeof managementSections[number])) {
     throw createError({ statusCode: 404, statusMessage: 'La sección solicitada no existe.' })
   }
+  if (section === 'accesos' || section === 'productos') requireRole(event, 'admin')
   const routeId = getRouterParam(event, 'id')
   const id = section === 'zonas' ? 0 : parsePositiveId(routeId)
   const db = useDrizzle()
@@ -157,5 +160,21 @@ export default defineEventHandler(async (event) => {
   })()
 
   if (!restored) throw createError({ statusCode: 404, statusMessage: 'No se encontró un registro eliminado para restaurar.' })
+  if (section === 'accesos' || section === 'productos' || section === 'compras' || section === 'ventas') {
+    await logAuditEvent(event, {
+      action: section === 'accesos'
+        ? 'USER_RESTORED'
+        : section === 'productos'
+          ? 'PRODUCT_RESTORED'
+          : 'STOCK_ADJUSTED',
+      entity: section === 'accesos'
+        ? 'users'
+        : section === 'productos'
+          ? 'products'
+          : section,
+      entityId: routeId ?? '',
+      details: { before: { deleted: true }, after: { deleted: false } }
+    })
+  }
   return { success: true, data: { id: routeId, deleted: false, archived: false } }
 })

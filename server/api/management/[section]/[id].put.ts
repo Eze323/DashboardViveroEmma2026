@@ -1,6 +1,7 @@
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import { getRouterParam, readBody } from 'h3'
 import { z } from 'zod'
+import { hash } from 'bcryptjs'
 import {
   customers,
   locations,
@@ -11,9 +12,12 @@ import {
   sales,
   supplierPrices,
   suppliers,
+  users,
   zones
 } from '../../../../src/db/schema'
 import { useDrizzle } from '../../../utils/drizzle'
+import { requireRole } from '../../../utils/auth'
+import { logAuditEvent } from '../../../utils/audit'
 import { isUniqueConstraintError, managementSections, parsePositiveId } from '../../../utils/management'
 import { priceSaleLines } from '../../../utils/sale-pricing'
 import { notDeleted } from '../../../utils/soft-delete'
@@ -88,6 +92,12 @@ const zoneInput = z.object({
   alto: z.coerce.number().int().positive().max(100000),
   color: z.string().trim().min(1).max(255)
 }).partial()
+const userInput = z.object({
+  nombre: z.string().trim().min(1).max(255),
+  email: z.string().trim().email().max(255),
+  rol: z.enum(['admin', 'encargado', 'vendedor', 'operario', 'user']),
+  password: z.string().min(12).max(1024)
+}).partial()
 
 function requireRow<T>(row: T | undefined, action: string): T {
   if (!row) throw createError({ statusCode: 404, statusMessage: `No se encontró el registro para ${action}.` })
@@ -129,6 +139,7 @@ export default defineEventHandler(async (event) => {
   if (!managementSections.includes(section as typeof managementSections[number])) {
     throw createError({ statusCode: 404, statusMessage: 'La sección solicitada no existe.' })
   }
+  if (section === 'accesos') requireRole(event, 'admin')
   const routeId = getRouterParam(event, 'id')
   const id = section === 'zonas' ? 0 : parsePositiveId(routeId)
   const body: unknown = await readBody(event)
@@ -138,6 +149,20 @@ export default defineEventHandler(async (event) => {
     switch (section) {
       case 'productos': {
         const input = productInput.parse(body)
+        const [before] = await db.select({
+          id: products.id,
+          name: products.name,
+          category: products.category,
+          description: products.description,
+          purchasePrice: products.purchasePrice,
+          salePrice: products.salePrice,
+          stock: products.stock,
+          potSize: products.potSize,
+          imageUrl: products.imageUrl,
+          sku: products.sku,
+          published: products.published
+        }).from(products).where(and(eq(products.id, id), notDeleted(products))).limit(1)
+        const current = requireRow(before, 'encontrar el producto')
         const updated = await db.update(products).set({
           ...(input.nombre !== undefined ? { name: input.nombre } : {}),
           ...(input.categoria !== undefined ? { category: input.categoria } : {}),
@@ -146,10 +171,78 @@ export default defineEventHandler(async (event) => {
           ...(input.precio !== undefined ? { salePrice: input.precio.toFixed(2) } : {}),
           ...(input.stock !== undefined ? { stock: input.stock } : {}),
           ...(input.potSize !== undefined ? { potSize: input.potSize || null } : {}),
+          ...(input.imageUrl !== undefined ? { imageUrl: input.imageUrl || null } : {}),
           ...(input.estado !== undefined ? { published: input.estado === 'Publicado' } : {}),
           updatedAt: new Date()
-        }).where(and(eq(products.id, id), notDeleted(products))).returning({ id: products.id })
+        }).where(and(eq(products.id, id), notDeleted(products))).returning({
+          id: products.id,
+          name: products.name,
+          category: products.category,
+          description: products.description,
+          purchasePrice: products.purchasePrice,
+          salePrice: products.salePrice,
+          stock: products.stock,
+          potSize: products.potSize,
+          imageUrl: products.imageUrl,
+          sku: products.sku,
+          published: products.published
+        })
         requireRow(updated[0], 'actualizar el producto')
+        const action = input.stock !== undefined && input.stock !== current.stock
+          ? 'STOCK_ADJUSTED'
+          : 'PRODUCT_UPDATED'
+        await logAuditEvent(event, {
+          action,
+          entity: 'products',
+          entityId: String(id),
+          details: { before: current, after: updated[0] }
+        })
+        return { success: true, data: { id: String(id) } }
+      }
+
+      case 'accesos': {
+        const input = userInput.parse(body)
+        const [before] = await db.select({
+          id: users.id,
+          name: users.name,
+          email: users.email,
+          role: users.role
+        }).from(users).where(and(eq(users.id, id), notDeleted(users))).limit(1)
+        const current = requireRow(before, 'encontrar el usuario')
+
+        if (Number(current.id) === event.context.user?.id && input.rol !== undefined && input.rol !== 'admin') {
+          throw createError({ statusCode: 409, statusMessage: 'No puedes quitarte el rol de administrador.' })
+        }
+        if (current.role === 'admin' && input.rol !== undefined && input.rol !== 'admin') {
+          const [activeAdmins] = await db.select({
+            total: sql<number>`count(*)::int`
+          }).from(users).where(and(eq(users.role, 'admin'), notDeleted(users)))
+          if ((activeAdmins?.total ?? 0) <= 1) {
+            throw createError({ statusCode: 409, statusMessage: 'No se puede quitar el único rol de administrador activo.' })
+          }
+        }
+
+        const values = {
+          ...(input.nombre !== undefined ? { name: input.nombre } : {}),
+          ...(input.email !== undefined ? { email: input.email.toLowerCase() } : {}),
+          ...(input.rol !== undefined ? { role: input.rol } : {}),
+          ...(input.password ? { password: await hash(input.password, 12) } : {})
+        }
+        const [updated] = await db.update(users).set(values)
+          .where(and(eq(users.id, id), notDeleted(users)))
+          .returning({
+            id: users.id,
+            name: users.name,
+            email: users.email,
+            role: users.role
+          })
+        requireRow(updated, 'actualizar el usuario')
+        await logAuditEvent(event, {
+          action: 'USER_UPDATED',
+          entity: 'users',
+          entityId: String(id),
+          details: { before: current, after: updated }
+        })
         return { success: true, data: { id: String(id) } }
       }
 
@@ -222,7 +315,7 @@ export default defineEventHandler(async (event) => {
         const updated = await db.update(plantPotPrices).set({
           ...(input.productoId !== undefined ? { productId: input.productoId } : {}),
           ...(input.medida !== undefined ? { potSize: input.medida } : {}),
-          ...(input.precio !== undefined ? { price: input.precio.toFixed(2) } : {}),
+          ...(input.precio !== undefined ? { price: input.precio.toFixed(2) } : {})
         }).where(and(eq(plantPotPrices.id, id), notDeleted(plantPotPrices))).returning({ id: plantPotPrices.id })
         requireRow(updated[0], 'actualizar el precio por tamaño')
         return { success: true, data: { id: String(id) } }
@@ -261,7 +354,7 @@ export default defineEventHandler(async (event) => {
 
       case 'ventas': {
         const input = saleInput.parse(body)
-        await db.transaction(async (tx) => {
+        const change = await db.transaction(async (tx) => {
           const [old] = await tx.select().from(sales).where(and(eq(sales.id, id), notDeleted(sales))).limit(1)
           const oldSale = requireRow(old, 'encontrar la venta')
           if (oldSale.status === 'Cancelada' || oldSale.status === 'Anulada') {
@@ -334,7 +427,7 @@ export default defineEventHandler(async (event) => {
           }
 
           const total = nextItems.reduce((sum, item) => sum + item.quantity * Number(item.unitPrice), 0)
-          await tx.update(sales).set({
+          const [updatedSale] = await tx.update(sales).set({
             customerId: nextCustomerId,
             customer: nextCustomer,
             seller: input.vendedor ?? oldSale.seller,
@@ -343,7 +436,30 @@ export default defineEventHandler(async (event) => {
             totalPrice: total.toFixed(2),
             inventoryAppliedAt: newApplied ? oldSale.inventoryAppliedAt ?? new Date() : null,
             updatedAt: new Date()
-          }).where(eq(sales.id, id))
+          }).where(eq(sales.id, id)).returning({
+            id: sales.id,
+            date: sales.date,
+            status: sales.status,
+            totalPrice: sales.totalPrice,
+            inventoryAppliedAt: sales.inventoryAppliedAt
+          })
+          return {
+            before: {
+              id: oldSale.id,
+              date: oldSale.date,
+              status: oldSale.status,
+              totalPrice: oldSale.totalPrice,
+              inventoryAppliedAt: oldSale.inventoryAppliedAt
+            },
+            after: requireRow(updatedSale, 'actualizar la venta'),
+            stockAdjustments: Array.from(deltas, ([productId, stockDelta]) => ({ productId, stockDelta }))
+          }
+        })
+        await logAuditEvent(event, {
+          action: change.stockAdjustments.length ? 'STOCK_ADJUSTED' : 'SALE_UPDATED',
+          entity: 'sales',
+          entityId: String(id),
+          details: change
         })
         return { success: true, data: { id: String(id) } }
       }

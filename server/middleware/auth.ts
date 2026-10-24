@@ -35,4 +35,7 @@ export default defineEventHandler(async (event) => {
   }
 
   if (!authenticated) return sendRedirect(event, '/login', 302)
+  if (pathname === '/' && session?.role !== 'admin') {
+    return sendRedirect(event, '/admin/ventas', 302)
+  }
 })

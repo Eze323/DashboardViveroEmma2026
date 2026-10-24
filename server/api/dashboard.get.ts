@@ -1,6 +1,7 @@
 import { and, desc, gte, lte, notInArray, sql, sum } from 'drizzle-orm'
 import { getQuery } from 'h3'
 import { customers, products, sales } from '../../src/db/schema'
+import { requireRole } from '../utils/auth'
 import { useDrizzle } from '../utils/drizzle'
 import { notDeleted } from '../utils/soft-delete'
 
@@ -28,6 +29,7 @@ function argentinaDate(): string {
 }
 
 export default defineEventHandler(async (event) => {
+  requireRole(event, 'admin')
   const query = getQuery(event)
   const today = argentinaDate()
   const from = query.from === undefined ? shiftDate(today, -14) : query.from

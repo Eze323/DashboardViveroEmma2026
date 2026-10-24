@@ -71,11 +71,13 @@ const editableSections: ViveroSection[] = [
   'precios-proveedor',
   'precios-maceta',
   'ubicaciones',
-  'zonas'
+  'zonas',
+  'accesos'
 ]
 const archiveSections: ViveroSection[] = [
   'productos',
   'clientes',
+  'accesos',
   'proveedores',
   'compras',
   'precios-proveedor',
@@ -262,7 +264,7 @@ function triggerImagePicker() {
 
 watch(() => form.imageUrl, (newUrl) => {
   if (newUrl && failedProductImages.value[newUrl]) {
-    delete failedProductImages.value[newUrl]
+    failedProductImages.value[newUrl] = false
   }
 })
 
@@ -287,6 +289,16 @@ function fieldValue(field: ManagementField, value: ManagementRow[keyof Managemen
 function formatCell(field: ManagementField, value: ManagementRow[keyof ManagementRow] | undefined): string {
   if (field.format === 'currency') return currency(Number(value ?? 0))
   if (field.key === 'monitoreada') return value ? 'Sí' : 'No'
+  if (section.value === 'accesos' && field.key === 'rol') {
+    const labels: Record<string, string> = {
+      admin: 'Administrador',
+      encargado: 'Encargado',
+      vendedor: 'Vendedor',
+      operario: 'Operario',
+      user: 'Usuario'
+    }
+    return labels[String(value ?? '')] ?? 'Sin rol'
+  }
   return recordValue(value) || '—'
 }
 
@@ -559,6 +571,7 @@ function payloadFromForm(): Record<string, unknown> {
   for (const field of visibleFields.value) {
     if (field.readonly) continue
     const value = form[field.key] ?? ''
+    if (section.value === 'accesos' && field.key === 'password' && !String(value).trim()) continue
     if (field.type === 'number') payload[field.key] = Number(value || 0)
     else if (field.type === 'datetime-local') payload[field.key] = value ? new Date(value).toISOString() : ''
     else payload[field.key] = value
@@ -601,11 +614,22 @@ async function uploadProductImage(file: File | null, fromUrl?: string) {
 
     form.imageUrl = uploadedUrl
     if (failedProductImages.value[uploadedUrl]) {
-      delete failedProductImages.value[uploadedUrl]
+      failedProductImages.value[uploadedUrl] = false
     }
     return uploadedUrl
-  } catch (error: any) {
-    const message = error?.data?.statusMessage || error?.statusMessage || (error instanceof Error ? error.message : 'No se pudo subir la imagen.')
+  } catch (error: unknown) {
+    const responseMessage = typeof error === 'object' && error !== null && 'data' in error
+      && typeof error.data === 'object' && error.data !== null
+      && 'statusMessage' in error.data && typeof error.data.statusMessage === 'string'
+      ? error.data.statusMessage
+      : undefined
+    const statusMessage = typeof error === 'object' && error !== null
+      && 'statusMessage' in error && typeof error.statusMessage === 'string'
+      ? error.statusMessage
+      : undefined
+    const message = responseMessage
+      || statusMessage
+      || (error instanceof Error ? error.message : 'No se pudo subir la imagen.')
     imageUploadError.value = message
     toast.add({
       title: 'No se pudo guardar la imagen',
@@ -638,6 +662,12 @@ async function saveDatabaseRecord() {
   }
 
   const payload = payloadFromForm()
+  if (section.value === 'accesos') {
+    const password = String(form.password ?? '')
+    if ((!editingRecord.value || password) && password.length < 12) {
+      throw new Error('La contraseña debe tener al menos 12 caracteres.')
+    }
+  }
   for (const field of visibleFields.value) {
     const message = validationMessage(field)
     if (message) throw new Error(message)
@@ -1112,7 +1142,7 @@ function visibleCardFields(row: ManagementRow) {
             <UFormField
               :label="formField.label"
               :name="formField.key"
-              :required="formField.required"
+              :required="formField.required || (section === 'accesos' && formField.key === 'password' && !editingRecord)"
               :description="formField.help"
             >
               <template #default>
@@ -1179,8 +1209,8 @@ function visibleCardFields(row: ManagementRow) {
                   </p>
                 </div>
                 <component
-                  v-else
                   :is="formField.type === 'select' ? USelectComponent : UInputComponent"
+                  v-else
                   v-model="form[formField.key]"
                   :items="formField.type === 'select'
                     ? formField.key === 'productoId' ? productOptions : formField.key === 'proveedorId' ? supplierOptions : formField.options ?? []

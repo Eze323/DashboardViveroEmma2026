@@ -17,6 +17,8 @@ import { useDrizzle } from '../../../utils/drizzle'
 import { requireRole } from '../../../utils/auth'
 import { logAuditEvent } from '../../../utils/audit'
 import { managementSections, parsePositiveId } from '../../../utils/management'
+import { invalidateManagementCategoriesCache } from '../../../utils/management-cache'
+import { applyStockDelta } from '../../../utils/stock-movements'
 import { notDeleted } from '../../../utils/soft-delete'
 
 function requireAffected(count: number): void {
@@ -68,6 +70,7 @@ export default defineEventHandler(async (event) => {
         entityId: String(id),
         details: { before, after: { ...before, deletedAt } }
       })
+      await invalidateManagementCategoriesCache()
       break
     }
 
@@ -175,26 +178,12 @@ export default defineEventHandler(async (event) => {
           .where(and(eq(purchases.id, id), notDeleted(purchases))).limit(1)
         if (!purchase) throw createError({ statusCode: 404, statusMessage: 'No se encontró una compra activa para eliminar.' })
 
-        const [stockBefore] = await tx.select({
-          id: products.id,
-          stock: products.stock
-        }).from(products).where(eq(products.id, purchase.productId)).limit(1)
-        if (!stockBefore) throw createError({ statusCode: 409, statusMessage: 'No se encontró el producto asociado a la compra.' })
-
-        const [stockAfter] = await tx.update(products).set({
-          stock: sql`${products.stock} - ${purchase.quantity}`,
-          updatedAt: deletedAt
-        }).where(sql`${products.id} = ${purchase.productId} and ${products.stock} >= ${purchase.quantity}`).returning({
-          id: products.id,
-          stock: products.stock
-        })
-
-        if (!stockAfter) {
-          throw createError({
-            statusCode: 409,
-            statusMessage: 'No se puede eliminar esta compra porque el stock actual ya no alcanza para revertirla.'
-          })
-        }
+        const { before: stockBefore, after: stockAfter } = await applyStockDelta(
+          tx,
+          purchase.productId,
+          -purchase.quantity,
+          'REBOOT_IN'
+        )
 
         await tx.update(purchases)
           .set({ deletedAt, archivedAt: deletedAt })
@@ -244,10 +233,7 @@ export default defineEventHandler(async (event) => {
             .from(saleItems).where(and(eq(saleItems.saleId, id), notDeleted(saleItems)))
 
           for (const item of items) {
-            await tx.update(products).set({
-              stock: sql`${products.stock} + ${item.quantity}`,
-              updatedAt: deletedAt
-            }).where(eq(products.id, item.productId))
+            await applyStockDelta(tx, item.productId, item.quantity, 'SALE')
             inventoryAdjustments.push(item)
           }
         }

@@ -4,12 +4,14 @@ import { z } from 'zod'
 import { hash } from 'bcryptjs'
 import {
   customers,
+  categories,
   locations,
   plantPotPrices,
   products,
   purchases,
   saleItems,
   sales,
+  stockMovements,
   supplierPrices,
   suppliers,
   users,
@@ -19,14 +21,16 @@ import { useDrizzle } from '../../../utils/drizzle'
 import { requireRole } from '../../../utils/auth'
 import { logAuditEvent } from '../../../utils/audit'
 import { isUniqueConstraintError, managementSections, parsePositiveId } from '../../../utils/management'
+import { invalidateManagementCategoriesCache } from '../../../utils/management-cache'
 import { priceSaleLines } from '../../../utils/sale-pricing'
 import { notDeleted } from '../../../utils/soft-delete'
+import { applyStockDelta } from '../../../utils/stock-movements'
 
 const idField = z.coerce.number().int().positive().safe()
 const priceField = z.coerce.number().finite().min(0).max(99999999.99)
 const productInput = z.object({
   nombre: z.string().trim().min(1).max(255),
-  categoria: z.string().trim().min(1).max(50),
+  categoryId: idField,
   descripcion: z.string().trim().max(500).optional(),
   precioCompra: priceField,
   precio: priceField,
@@ -115,22 +119,12 @@ function throwWriteError(error: unknown): never {
 
 async function applyInventoryDelta(
   tx: Parameters<Parameters<ReturnType<typeof useDrizzle>['transaction']>[0]>[0],
-  deltas: Map<number, number>
+  deltas: Map<number, number>,
+  movementType: 'REBOOT_IN' | 'SALE'
 ) {
   for (const [productId, delta] of deltas) {
     if (delta === 0) continue
-    const changed = delta > 0
-      ? await tx.update(products).set({
-          stock: sql`${products.stock} + ${delta}`,
-          updatedAt: new Date()
-        }).where(eq(products.id, productId)).returning({ id: products.id })
-      : await tx.update(products).set({
-          stock: sql`${products.stock} + ${delta}`,
-          updatedAt: new Date()
-        }).where(sql`${products.id} = ${productId} and ${products.stock} >= ${-delta}`).returning({ id: products.id })
-    if (changed.length === 0) {
-      throw createError({ statusCode: 409, statusMessage: 'El ajuste dejaría el inventario por debajo de cero o el producto ya no existe.' })
-    }
+    await applyStockDelta(tx, productId, delta, movementType)
   }
 }
 
@@ -149,54 +143,85 @@ export default defineEventHandler(async (event) => {
     switch (section) {
       case 'productos': {
         const input = productInput.parse(body)
-        const [before] = await db.select({
-          id: products.id,
-          name: products.name,
-          category: products.category,
-          description: products.description,
-          purchasePrice: products.purchasePrice,
-          salePrice: products.salePrice,
-          stock: products.stock,
-          potSize: products.potSize,
-          imageUrl: products.imageUrl,
-          sku: products.sku,
-          published: products.published
-        }).from(products).where(and(eq(products.id, id), notDeleted(products))).limit(1)
-        const current = requireRow(before, 'encontrar el producto')
-        const updated = await db.update(products).set({
-          ...(input.nombre !== undefined ? { name: input.nombre } : {}),
-          ...(input.categoria !== undefined ? { category: input.categoria } : {}),
-          ...(input.descripcion !== undefined ? { description: input.descripcion || null } : {}),
-          ...(input.precioCompra !== undefined ? { purchasePrice: input.precioCompra.toFixed(2) } : {}),
-          ...(input.precio !== undefined ? { salePrice: input.precio.toFixed(2) } : {}),
-          ...(input.stock !== undefined ? { stock: input.stock } : {}),
-          ...(input.potSize !== undefined ? { potSize: input.potSize || null } : {}),
-          ...(input.imageUrl !== undefined ? { imageUrl: input.imageUrl || null } : {}),
-          ...(input.estado !== undefined ? { published: input.estado === 'Publicado' } : {}),
-          updatedAt: new Date()
-        }).where(and(eq(products.id, id), notDeleted(products))).returning({
-          id: products.id,
-          name: products.name,
-          category: products.category,
-          description: products.description,
-          purchasePrice: products.purchasePrice,
-          salePrice: products.salePrice,
-          stock: products.stock,
-          potSize: products.potSize,
-          imageUrl: products.imageUrl,
-          sku: products.sku,
-          published: products.published
+        const updated = await db.transaction(async (tx) => {
+          const [current] = await tx.select({
+            id: products.id,
+            name: products.name,
+            category: products.category,
+            description: products.description,
+            purchasePrice: products.purchasePrice,
+            salePrice: products.salePrice,
+            stock: products.stock,
+            categoryId: products.categoryId,
+            potSize: products.potSize,
+            imageUrl: products.imageUrl,
+            sku: products.sku,
+            published: products.published
+          }).from(products)
+            .where(and(eq(products.id, id), notDeleted(products)))
+            .for('update')
+          const before = requireRow(current, 'encontrar el producto')
+          let selectedCategory: { id: number, name: string } | undefined
+          if (input.categoryId !== undefined) {
+            const [category] = await tx.select({ id: categories.id, name: categories.name }).from(categories)
+              .where(and(
+                eq(categories.id, input.categoryId),
+                notDeleted(categories),
+                sql`${categories.archivedAt} is null`
+              ))
+              .limit(1)
+            if (!category) throw createError({ statusCode: 400, statusMessage: 'Selecciona una categoría activa.' })
+            selectedCategory = category
+          }
+          const [row] = await tx.update(products).set({
+            ...(input.nombre !== undefined ? { name: input.nombre } : {}),
+            ...(selectedCategory ? { category: selectedCategory.name, categoryId: selectedCategory.id } : {}),
+            ...(input.descripcion !== undefined ? { description: input.descripcion || null } : {}),
+            ...(input.precioCompra !== undefined ? { purchasePrice: input.precioCompra.toFixed(2) } : {}),
+            ...(input.precio !== undefined ? { salePrice: input.precio.toFixed(2) } : {}),
+            ...(input.stock !== undefined ? { stock: input.stock } : {}),
+            ...(input.potSize !== undefined ? { potSize: input.potSize || null } : {}),
+            ...(input.imageUrl !== undefined ? { imageUrl: input.imageUrl || null } : {}),
+            ...(input.estado !== undefined ? { published: input.estado === 'Publicado' } : {}),
+            updatedAt: new Date()
+          }).where(and(eq(products.id, id), notDeleted(products))).returning({
+            id: products.id,
+            name: products.name,
+            category: products.category,
+            categoryId: products.categoryId,
+            description: products.description,
+            purchasePrice: products.purchasePrice,
+            salePrice: products.salePrice,
+            stock: products.stock,
+            potSize: products.potSize,
+            imageUrl: products.imageUrl,
+            sku: products.sku,
+            published: products.published
+          })
+          const result = requireRow(row, 'actualizar el producto')
+          if (before.stock !== result.stock || before.salePrice !== result.salePrice) {
+            await tx.insert(stockMovements).values({
+              productId: id,
+              type: 'MANUAL_ADJUSTMENT',
+              quantity: result.stock - before.stock,
+              previousStock: before.stock,
+              newStock: result.stock,
+              previousPrice: before.salePrice,
+              newPrice: result.salePrice
+            })
+          }
+          return { before, after: result }
         })
-        requireRow(updated[0], 'actualizar el producto')
-        const action = input.stock !== undefined && input.stock !== current.stock
+        const action = input.stock !== undefined && input.stock !== updated.before.stock
           ? 'STOCK_ADJUSTED'
           : 'PRODUCT_UPDATED'
         await logAuditEvent(event, {
           action,
           entity: 'products',
           entityId: String(id),
-          details: { before: current, after: updated[0] }
+          details: updated
         })
+        await invalidateManagementCategoriesCache()
         return { success: true, data: { id: String(id) } }
       }
 
@@ -285,7 +310,7 @@ export default defineEventHandler(async (event) => {
           const deltas = new Map<number, number>()
           deltas.set(oldPurchase.productId, (deltas.get(oldPurchase.productId) ?? 0) - oldPurchase.quantity)
           deltas.set(nextProductId, (deltas.get(nextProductId) ?? 0) + nextQuantity)
-          await applyInventoryDelta(tx, deltas)
+          await applyInventoryDelta(tx, deltas, 'REBOOT_IN')
           await tx.update(purchases).set({
             productId: nextProductId,
             supplierId: nextSupplierId,
@@ -409,7 +434,7 @@ export default defineEventHandler(async (event) => {
             const delta = (oldApplied ? oldQuantity : 0) - (newApplied ? nextQuantity : 0)
             if (delta) deltas.set(productId, delta)
           }
-          await applyInventoryDelta(tx, deltas)
+          await applyInventoryDelta(tx, deltas, 'SALE')
 
           if (input.items) {
             const now = new Date()

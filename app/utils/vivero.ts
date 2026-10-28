@@ -49,7 +49,7 @@ export const viveroModules: Record<ViveroSection, ManagementModule> = {
     icon: 'i-lucide-flower-2',
     fields: [
       { key: 'nombre', label: 'Producto', required: true },
-      { key: 'categoria', label: 'Categoría', type: 'select', options: ['Plantas', 'Macetas', 'Sustratos', 'Herramientas'] },
+      { key: 'categoria', label: 'Categoría', type: 'select', required: true },
       { key: 'sku', label: 'SKU automático', readonly: true, help: 'Se asigna y guarda automáticamente al crear el producto.' },
       { key: 'descripcion', label: 'Descripción' },
       { key: 'precioCompra', label: 'Costo de compra', type: 'number', format: 'currency', required: true },

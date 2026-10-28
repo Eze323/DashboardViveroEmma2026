@@ -1,20 +1,22 @@
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import { getRouterParam, readBody } from 'h3'
 import { z } from 'zod'
 import { hash } from 'bcryptjs'
-import { customers, locations, plantPotPrices, products, purchases, saleItems, sales, supplierPrices, suppliers, users, zones } from '../../../src/db/schema'
+import { categories, customers, locations, plantPotPrices, products, purchases, saleItems, sales, stockMovements, supplierPrices, suppliers, users, zones } from '../../../src/db/schema'
 import { useDrizzle } from '../../utils/drizzle'
 import { requireRole } from '../../utils/auth'
 import { logAuditEvent } from '../../utils/audit'
 import { isUniqueConstraintError, managementSections } from '../../utils/management'
+import { invalidateManagementCategoriesCache } from '../../utils/management-cache'
 import { priceSaleLines } from '../../utils/sale-pricing'
+import { applyStockDelta } from '../../utils/stock-movements'
 
 const positiveId = z.coerce.number().int().positive().safe()
 const money = z.coerce.number().finite().min(0).max(99999999.99)
 const optionalText = z.string().trim().max(500).optional().nullable()
 const productInput = z.object({
   nombre: z.string().trim().min(1).max(255),
-  categoria: z.string().trim().min(1).max(50),
+  categoryId: positiveId,
   descripcion: optionalText,
   precioCompra: money,
   precio: money,
@@ -120,9 +122,15 @@ export default defineEventHandler(async (event) => {
       case 'productos': {
         const input = productInput.parse(body)
         const product = await db.transaction(async (tx) => {
+          const [category] = await tx.select({ id: categories.id, name: categories.name })
+            .from(categories)
+            .where(and(eq(categories.id, input.categoryId), sql`${categories.deletedAt} is null and ${categories.archivedAt} is null`))
+            .limit(1)
+          if (!category) throw createError({ statusCode: 400, statusMessage: 'Selecciona una categoría activa.' })
           const inserted = requireRow((await tx.insert(products).values({
             name: input.nombre,
-            category: input.categoria,
+            category: category.name,
+            categoryId: category.id,
             description: input.descripcion || null,
             purchasePrice: input.precioCompra.toFixed(2),
             salePrice: input.precio.toFixed(2),
@@ -133,7 +141,19 @@ export default defineEventHandler(async (event) => {
             sku: null
           }).returning({ id: products.id }))[0], 'crear el producto')
           const sku = `VE-${String(inserted.id).padStart(6, '0')}`
-          return requireRow((await tx.update(products).set({ sku }).where(eq(products.id, inserted.id)).returning())[0], 'asignar el SKU')
+          const created = requireRow((await tx.update(products).set({ sku }).where(eq(products.id, inserted.id)).returning())[0], 'asignar el SKU')
+          if (input.stock > 0) {
+            await tx.insert(stockMovements).values({
+              productId: created.id,
+              type: 'MANUAL_ADJUSTMENT',
+              quantity: input.stock,
+              previousStock: 0,
+              newStock: input.stock,
+              previousPrice: null,
+              newPrice: created.salePrice
+            })
+          }
+          return created
         })
         await logAuditEvent(event, {
           action: 'PRODUCT_CREATED',
@@ -141,6 +161,7 @@ export default defineEventHandler(async (event) => {
           entityId: String(product.id),
           details: { before: null, after: product }
         })
+        await invalidateManagementCategoriesCache()
         return { success: true, data: { id: String(product.id), sku: product.sku } }
       }
 
@@ -186,6 +207,22 @@ export default defineEventHandler(async (event) => {
         const input = supplierInput.parse(body)
         const row = requireRow((await db.insert(suppliers).values({ name: input.nombre }).returning({ id: suppliers.id }))[0], 'crear el proveedor')
         return { success: true, data: { id: String(row.id) } }
+      }
+
+      case 'categorias': {
+        requireRole(event, 'admin')
+        requireRole(event, 'admin')
+        const input = z.object({
+          nombre: z.string().trim().min(1).max(50),
+          descripcion: z.string().trim().max(500).optional()
+        }).parse(body)
+        const [category] = await db.insert(categories).values({
+          name: input.nombre,
+          description: input.descripcion || null
+        }).returning({ id: categories.id, name: categories.name })
+        if (!category) throw new Error('La base no devolvió la categoría creada.')
+        await invalidateManagementCategoriesCache()
+        return { success: true, data: { id: String(category.id), nombre: category.name } }
       }
 
       case 'ventas': {
@@ -245,14 +282,23 @@ export default defineEventHandler(async (event) => {
 
           if (appliesInventory) {
             for (const [productId, quantity] of totalsByProduct) {
-              const updated = await tx.update(products).set({
-                stock: sql`${products.stock} - ${quantity}`,
-                updatedAt: now
-              }).where(sql`${products.id} = ${productId} and ${products.deletedAt} is null and ${products.archivedAt} is null and ${products.stock} >= ${quantity}`).returning({ id: products.id })
-              if (updated.length === 0) {
-                const [product] = await tx.select({ name: products.name, stock: products.stock }).from(products).where(eq(products.id, productId)).limit(1)
-                if (!product) throw createError({ statusCode: 400, statusMessage: 'Uno de los productos no existe o está eliminado.' })
+              const [product] = await tx.select({ id: products.id, name: products.name, stock: products.stock })
+                .from(products)
+                .where(sql`${products.id} = ${productId} and ${products.deletedAt} is null and ${products.archivedAt} is null`)
+                .for('update')
+              if (!product) {
+                throw createError({ statusCode: 400, statusMessage: 'Uno de los productos no existe o está eliminado.' })
+              }
+              if (product.stock < quantity) {
                 throw createError({ statusCode: 409, statusMessage: `Stock insuficiente para "${product.name}". Disponible: ${product.stock}.` })
+              }
+              try {
+                await applyStockDelta(tx, productId, -quantity, 'SALE')
+              } catch (error) {
+                if (typeof error === 'object' && error !== null && 'statusCode' in error && error.statusCode === 404) {
+                  throw createError({ statusCode: 400, statusMessage: 'Uno de los productos no existe o está eliminado.' })
+                }
+                throw error
               }
             }
           }
@@ -327,10 +373,7 @@ export default defineEventHandler(async (event) => {
             purchasePrice: input.precio.toFixed(2),
             purchaseDate: new Date(input.fecha)
           }).returning({ id: purchases.id }))[0], 'crear la compra')
-          await tx.update(products).set({
-            stock: sql`${products.stock} + ${input.cantidad}`,
-            updatedAt: new Date()
-          }).where(eq(products.id, input.productoId))
+          await applyStockDelta(tx, input.productoId, input.cantidad, 'REBOOT_IN')
           return created
         })
         await logAuditEvent(event, {

@@ -1,6 +1,7 @@
 import { and, asc, count, countDistinct, desc, eq, ilike, or, sql } from 'drizzle-orm'
 import { getRouterParam } from 'h3'
 import {
+  categories,
   customers,
   locations,
   plantPotPrices,
@@ -47,6 +48,7 @@ export default defineEventHandler(async (event) => {
           id: String(row.id),
           nombre: row.name,
           categoria: row.category,
+          categoryId: String(row.categoryId),
           sku: row.sku ?? '',
           descripcion: row.description ?? '',
           precioCompra: Number(row.purchasePrice),
@@ -164,20 +166,27 @@ export default defineEventHandler(async (event) => {
 
     case 'categorias': {
       const where = and(
-        notDeleted(products),
-        query.search ? ilike(products.category, pattern) : undefined
+        notDeleted(categories),
+        query.search ? ilike(categories.name, pattern) : undefined
       )
       const [rows, totals] = await Promise.all([
         db.select({
-          nombre: products.category,
-          productos: count()
-        }).from(products).where(where).groupBy(products.category).orderBy(asc(products.category)).limit(query.limit).offset(query.offset),
-        db.select({ total: countDistinct(products.category) }).from(products).where(where)
+          id: categories.id,
+          nombre: categories.name,
+          productos: count(products.id)
+        }).from(categories)
+          .leftJoin(products, and(eq(products.categoryId, categories.id), notDeleted(products)))
+          .where(where)
+          .groupBy(categories.id, categories.name)
+          .orderBy(asc(categories.name))
+          .limit(query.limit)
+          .offset(query.offset),
+        db.select({ total: count() }).from(categories).where(where)
       ])
       return {
         section,
         source: 'database' as const,
-        data: rows.map(row => ({ id: row.nombre, nombre: row.nombre, productos: row.productos, estado: 'Activa' })),
+        data: rows.map(row => ({ id: String(row.id), nombre: row.nombre, productos: row.productos, estado: 'Activa' })),
         meta: paginationMeta(query.page, query.limit, totals[0]?.total ?? 0)
       }
     }

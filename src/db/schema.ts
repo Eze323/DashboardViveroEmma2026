@@ -11,15 +11,29 @@ import {
   text,
   time,
   timestamp,
+  uniqueIndex,
   varchar
 } from 'drizzle-orm/pg-core'
 
 export const roleEnum = pgEnum('role', ['admin', 'encargado', 'vendedor', 'operario', 'user'])
+export const stockMovementTypeEnum = pgEnum('stock_movement_type', ['REBOOT_IN', 'SALE', 'MANUAL_ADJUSTMENT'])
+
+export const categories = pgTable('categories', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  name: varchar('name', { length: 50 }).notNull(),
+  description: varchar('description', { length: 500 }),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+  archivedAt: timestamp('archived_at'),
+  deletedAt: timestamp('deleted_at', { mode: 'date' })
+}, table => [
+  uniqueIndex('categories_name_unique').on(table.name)
+])
 
 export const products = pgTable('products', {
   id: bigserial('id', { mode: 'number' }).primaryKey(),
   name: varchar('name', { length: 255 }).notNull(),
   category: varchar('category', { length: 50 }).notNull(),
+  categoryId: bigint('category_id', { mode: 'number' }).notNull().references(() => categories.id, { onDelete: 'restrict' }),
   description: varchar('description', { length: 500 }),
   purchasePrice: decimal('precio_compra', { precision: 10, scale: 2 }).notNull(),
   salePrice: decimal('precio_venta', { precision: 10, scale: 2 }).notNull(),
@@ -32,6 +46,18 @@ export const products = pgTable('products', {
   updatedAt: timestamp('updated_at').defaultNow(),
   archivedAt: timestamp('archived_at'),
   deletedAt: timestamp('deleted_at', { mode: 'date' })
+})
+
+export const stockMovements = pgTable('stock_movements', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  productId: bigint('product_id', { mode: 'number' }).notNull().references(() => products.id, { onDelete: 'restrict' }),
+  type: stockMovementTypeEnum('type').notNull(),
+  quantity: integer('quantity').notNull(),
+  previousStock: integer('previous_stock').notNull(),
+  newStock: integer('new_stock').notNull(),
+  previousPrice: decimal('previous_price', { precision: 10, scale: 2 }),
+  newPrice: decimal('new_price', { precision: 10, scale: 2 }),
+  createdAt: timestamp('created_at').notNull().defaultNow()
 })
 
 export const customers = pgTable('customers', {

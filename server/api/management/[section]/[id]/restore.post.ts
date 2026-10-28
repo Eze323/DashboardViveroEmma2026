@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import { getRouterParam } from 'h3'
 import {
   customers,
@@ -17,6 +17,8 @@ import { useDrizzle } from '../../../../utils/drizzle'
 import { requireRole } from '../../../../utils/auth'
 import { logAuditEvent } from '../../../../utils/audit'
 import { managementSections, parsePositiveId } from '../../../../utils/management'
+import { invalidateManagementCategoriesCache } from '../../../../utils/management-cache'
+import { applyStockDelta } from '../../../../utils/stock-movements'
 import { isDeleted } from '../../../../utils/soft-delete'
 
 export default defineEventHandler(async (event) => {
@@ -69,10 +71,7 @@ export default defineEventHandler(async (event) => {
             .where(eq(products.id, purchase.productId)).limit(1)
           if (!product) throw createError({ statusCode: 409, statusMessage: 'No se puede restaurar la compra porque el producto ya no existe.' })
 
-          await tx.update(products).set({
-            stock: sql`${products.stock} + ${purchase.quantity}`,
-            updatedAt: new Date()
-          }).where(eq(products.id, purchase.productId))
+          await applyStockDelta(tx, purchase.productId, purchase.quantity, 'REBOOT_IN')
 
           await tx.update(purchases)
             .set({ deletedAt: null, archivedAt: null })
@@ -92,18 +91,7 @@ export default defineEventHandler(async (event) => {
 
           // Verificar stock suficiente antes de reactivar la venta
           for (const item of items) {
-            const updated = await tx.update(products).set({
-              stock: sql`${products.stock} - ${item.quantity}`,
-              updatedAt: new Date()
-            }).where(sql`${products.id} = ${item.productId} and ${products.stock} >= ${item.quantity}`).returning({ id: products.id })
-
-            if (updated.length === 0) {
-              const [prod] = await tx.select({ name: products.name, stock: products.stock }).from(products).where(eq(products.id, item.productId)).limit(1)
-              throw createError({
-                statusCode: 409,
-                statusMessage: `No hay stock suficiente para restaurar la venta. Producto: "${prod?.name ?? item.productId}". Stock disponible: ${prod?.stock ?? 0}.`
-              })
-            }
+            await applyStockDelta(tx, item.productId, -item.quantity, 'SALE')
           }
 
           // Restaurar las líneas de venta
@@ -176,5 +164,6 @@ export default defineEventHandler(async (event) => {
       details: { before: { deleted: true }, after: { deleted: false } }
     })
   }
+  if (section === 'productos') await invalidateManagementCategoriesCache()
   return { success: true, data: { id: routeId, deleted: false, archived: false } }
 })

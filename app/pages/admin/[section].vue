@@ -2,6 +2,7 @@
 import { h, resolveComponent } from 'vue'
 import type { TableColumn } from '@nuxt/ui'
 import { useSalesDraftStore } from '~/stores/salesDraft'
+import { downloadCsv } from '~/utils/csv'
 import type { ManagementField, ManagementRow, ViveroSection } from '~/utils/vivero'
 import { viveroModules } from '~/utils/vivero'
 
@@ -15,6 +16,10 @@ interface ManagementApiResponse {
     total: number
     totalPages: number
   }
+}
+
+interface CategoriesApiResponse {
+  data: Array<{ id: string, nombre: string }>
 }
 
 interface SelectOption {
@@ -160,6 +165,18 @@ const { data: managementResponse, status: managementStatus, error: managementErr
   }
 )
 const isLoading = computed(() => managementStatus.value === 'pending')
+const canExportData = computed(() => ['productos', 'ventas', 'facturas', 'categorias'].includes(section.value))
+const isExporting = ref(false)
+const togglingProductId = ref<string | null>(null)
+
+watch(managementError, (error) => {
+  if (!error) return
+  toast.add({
+    title: 'No se pudieron cargar los datos',
+    description: 'Verifica la conexión e inténtalo nuevamente.',
+    color: 'error'
+  })
+})
 
 const demoRecords = useState<Record<ViveroSection, ManagementRow[]>>('vivero-demo-records', () => {
   const records = {} as Record<ViveroSection, ManagementRow[]>
@@ -236,6 +253,14 @@ watch(totalPages, (value) => {
 })
 
 const modalOpen = ref(false)
+const categoryModalOpen = ref(false)
+const isCreatingCategory = ref(false)
+const newCategoryName = ref('')
+const priceAdjustmentModalOpen = ref(false)
+const isApplyingPriceAdjustment = ref(false)
+const priceAdjustmentMode = ref<'percentage' | 'fixed'>('percentage')
+const priceAdjustmentAmount = ref('')
+const selectedPriceCategoryId = ref('')
 const archiveModalOpen = ref(false)
 const completeSaleModalOpen = ref(false)
 const editingRecord = ref<ManagementRow | null>(null)
@@ -248,6 +273,7 @@ const saleComposerKey = ref(0)
 const form = reactive<Record<string, string>>({})
 const productOptions = ref<SelectOption[]>([])
 const supplierOptions = ref<SelectOption[]>([])
+const categoryOptions = ref<SelectOption[]>([])
 const customerOptions = ref<SelectOption[]>([{ label: 'Consumidor final', value: 'consumer-final' }])
 const isUploadingProductImage = ref(false)
 const imageUploadError = ref('')
@@ -317,6 +343,54 @@ function canCompleteSale(row: ManagementRow): boolean {
     && row.estado === 'Pendiente'
     && !row.cae
     && row.estadoFactura !== 'billed'
+}
+
+function updateProductStatus(id: string, status: string): void {
+  const data = managementResponse.value?.data
+  if (!data) return
+  const index = data.findIndex(row => row.id === id)
+  if (index !== -1) data[index] = { ...data[index]!, estado: status }
+}
+
+async function toggleProductVisibility(row: ManagementRow): Promise<void> {
+  if (togglingProductId.value) return
+  const previousStatus = recordValue(row.estado)
+  const isPublished = previousStatus !== 'Borrador'
+  const nextStatus = isPublished
+    ? 'Borrador'
+    : Number(row.stock ?? 0) > 0 ? 'Publicado' : 'Sin stock'
+  togglingProductId.value = row.id
+  updateProductStatus(row.id, nextStatus)
+
+  try {
+    await $fetch(`/api/management/productos/${row.id}`, {
+      method: 'PUT',
+      body: { estado: isPublished ? 'Borrador' : 'Publicado' }
+    })
+    toast.add({
+      title: nextStatus === 'Borrador' ? 'Producto oculto' : 'Producto visible',
+      description: 'El cambio se guardó correctamente.',
+      color: 'success'
+    })
+    try {
+      await refresh()
+    } catch {
+      toast.add({
+        title: 'No se pudo actualizar la lista',
+        description: 'El cambio sí se guardó. Recarga la página para ver los datos más recientes.',
+        color: 'warning'
+      })
+    }
+  } catch (error) {
+    updateProductStatus(row.id, previousStatus)
+    toast.add({
+      title: 'No se pudo cambiar la visibilidad',
+      description: error instanceof Error ? error.message : 'Inténtalo nuevamente.',
+      color: 'error'
+    })
+  } finally {
+    togglingProductId.value = null
+  }
 }
 
 function confirmCompleteSale(row: ManagementRow) {
@@ -413,6 +487,20 @@ const columns = computed<TableColumn<ManagementRow>[]>(() => {
       id: 'acciones',
       header: 'Acciones',
       cell: ({ row }) => h('div', { class: 'flex min-w-max justify-end gap-1' }, [
+        section.value === 'productos' && !isRecordArchived(row.original)
+          ? h(UButton, {
+              'icon': row.original.estado === 'Borrador' ? 'i-lucide-eye' : 'i-lucide-eye-off',
+              'color': row.original.estado === 'Borrador' ? 'success' : 'neutral',
+              'variant': 'ghost',
+              'size': 'sm',
+              'class': 'min-h-10 min-w-10',
+              'aria-label': row.original.estado === 'Borrador' ? 'Publicar producto' : 'Ocultar producto',
+              'title': row.original.estado === 'Borrador' ? 'Publicar' : 'Ocultar',
+              'loading': togglingProductId.value === row.original.id,
+              'disabled': togglingProductId.value !== null,
+              'onClick': () => toggleProductVisibility(row.original)
+            })
+          : null,
         canCompleteSale(row.original)
           ? h(UButton, {
               'icon': 'i-lucide-check',
@@ -482,7 +570,10 @@ const columns = computed<TableColumn<ManagementRow>[]>(() => {
 function resetForm(record?: ManagementRow) {
   for (const key of Object.keys(form)) form[key] = ''
   for (const field of visibleFields.value) form[field.key] = fieldValue(field, record?.[field.key])
-  if (section.value === 'productos') form.sku = recordValue(record?.sku) || 'Se asigna al guardar'
+  if (section.value === 'productos') {
+    form.sku = recordValue(record?.sku) || 'Se asigna al guardar'
+    form.categoryId = recordValue(record?.categoryId)
+  }
   if (section.value === 'productos' && !record) form.estado = 'Publicado'
   if (section.value === 'productos' && record?.estado === 'Sin stock') form.estado = 'Publicado'
   if (section.value === 'compras') form.fecha = recordValue(record?.fecha) || localDateTime()
@@ -493,7 +584,7 @@ function resetForm(record?: ManagementRow) {
 }
 
 async function loadFormOptions() {
-  const [productsResponse, suppliersResponse, customersResponse, sessionResponse] = await Promise.all([
+  const [productsResponse, suppliersResponse, customersResponse, sessionResponse, categoriesResponse] = await Promise.all([
     ['compras', 'precios-proveedor', 'precios-maceta'].includes(section.value)
       ? $fetch<ManagementApiResponse>('/api/management/productos?limit=100')
       : Promise.resolve(null),
@@ -505,6 +596,9 @@ async function loadFormOptions() {
       : Promise.resolve(null),
     section.value === 'ventas'
       ? $fetch<{ user: { name: string } | null }>('/api/auth/session')
+      : Promise.resolve(null),
+    section.value === 'productos'
+      ? $fetch<CategoriesApiResponse>('/api/categories')
       : Promise.resolve(null)
   ])
   if (section.value === 'ventas' && !editingRecord.value && sessionResponse?.user) {
@@ -522,6 +616,40 @@ async function loadFormOptions() {
     { label: 'Consumidor final', value: 'consumer-final' },
     ...(customersResponse?.data ?? []).map(row => ({ label: recordValue(row.nombre), value: row.id }))
   ]
+  if (categoriesResponse) {
+    categoryOptions.value = categoriesResponse.data.map(category => ({
+      label: category.nombre,
+      value: category.id
+    }))
+  }
+}
+
+async function createCategoryFromProductForm() {
+  const nombre = newCategoryName.value.trim()
+  if (!nombre || isCreatingCategory.value) return
+  isCreatingCategory.value = true
+  try {
+    const response = await $fetch<{ data: { id: string, nombre: string } }>('/api/categories', {
+      method: 'POST',
+      body: { nombre }
+    })
+    categoryOptions.value = [...categoryOptions.value, {
+      label: response.data.nombre,
+      value: response.data.id
+    }].sort((a, b) => a.label.localeCompare(b.label, 'es'))
+    form.categoryId = response.data.id
+    newCategoryName.value = ''
+    categoryModalOpen.value = false
+    toast.add({ title: 'Categoría creada', description: 'Se seleccionó para este producto.', color: 'success' })
+  } catch (error) {
+    toast.add({
+      title: 'No se pudo crear la categoría',
+      description: error instanceof Error ? error.message : 'Inténtalo nuevamente.',
+      color: 'error'
+    })
+  } finally {
+    isCreatingCategory.value = false
+  }
 }
 
 async function openCreateModal() {
@@ -576,12 +704,14 @@ function payloadFromForm(): Record<string, unknown> {
   const payload: Record<string, unknown> = {}
   for (const field of visibleFields.value) {
     if (field.readonly) continue
+    if (section.value === 'productos' && field.key === 'categoria') continue
     const value = form[field.key] ?? ''
     if (section.value === 'accesos' && field.key === 'password' && !String(value).trim()) continue
     if (field.type === 'number') payload[field.key] = Number(value || 0)
     else if (field.type === 'datetime-local') payload[field.key] = value ? new Date(value).toISOString() : ''
     else payload[field.key] = value
   }
+  if (section.value === 'productos') payload.categoryId = Number(form.categoryId || 0)
   if (section.value === 'ubicaciones') payload.monitoreada = form.monitoreada === 'Sí'
   return payload
 }
@@ -675,9 +805,11 @@ async function saveDatabaseRecord() {
     }
   }
   for (const field of visibleFields.value) {
+    if (section.value === 'productos' && field.key === 'categoria') continue
     const message = validationMessage(field)
     if (message) throw new Error(message)
   }
+  if (section.value === 'productos' && !form.categoryId) throw new Error('Selecciona una categoría para el producto.')
   if (section.value === 'proveedores' && !String(form.nombre ?? '').trim()) throw new Error('Ingresa el nombre del proveedor.')
   if (section.value === 'productos') {
     const imageUrl = String(form.imageUrl ?? '').trim()
@@ -786,6 +918,183 @@ async function restoreRecord(record: ManagementRow) {
       description: error instanceof Error ? error.message : 'No se modificaron los datos.',
       color: 'error'
     })
+  }
+}
+
+async function loadAllExportRows(targetSection: ViveroSection): Promise<ManagementRow[]> {
+  const request = (pageNumber: number) => $fetch<ManagementApiResponse>(`/api/management/${targetSection}`, {
+    query: { page: pageNumber, limit: 100, archived: 'false' }
+  })
+  const firstPage = await request(1)
+  if (!firstPage.data || !firstPage.meta) {
+    throw new Error('La API no devolvió los datos necesarios para completar la exportación.')
+  }
+
+  const rows = [...firstPage.data]
+  for (let pageNumber = 2; pageNumber <= firstPage.meta.totalPages; pageNumber++) {
+    const response = await request(pageNumber)
+    if (!response.data) {
+      throw new Error(`No se pudieron cargar los registros de la página ${pageNumber}.`)
+    }
+    rows.push(...response.data)
+  }
+  return rows
+}
+
+async function exportCsv(): Promise<void> {
+  if (isExporting.value) return
+  isExporting.value = true
+  try {
+    const targetSection = section.value
+    const rows = await loadAllExportRows(targetSection)
+    const exportColumns = targetSection === 'productos'
+      ? [
+          { key: 'nombre', label: 'Producto' },
+          { key: 'categoria', label: 'Categoría' },
+          { key: 'sku', label: 'SKU' },
+          { key: 'stock', label: 'Stock actual' },
+          { key: 'precio', label: 'Precio de venta' },
+          { key: 'estado', label: 'Estado' }
+        ]
+      : targetSection === 'categorias'
+        ? [
+            { key: 'nombre', label: 'Categoría' },
+            { key: 'productos', label: 'Cantidad de productos' },
+            { key: 'estado', label: 'Estado' }
+          ]
+        : [
+            { key: 'fecha', label: 'Fecha' },
+            { key: 'hora', label: 'Hora' },
+            { key: 'cliente', label: 'Cliente' },
+            { key: 'vendedor', label: 'Vendedor' },
+            { key: 'total', label: 'Total' },
+            { key: 'estado', label: 'Estado' },
+            { key: 'tipo', label: 'Comprobante' },
+            { key: 'numero', label: 'Número' },
+            { key: 'items', label: 'Artículos' }
+          ]
+    const filename = targetSection === 'productos'
+      ? 'inventario-vivero-emma.csv'
+      : targetSection === 'categorias'
+        ? 'categorias-vivero-emma.csv'
+        : 'historial-ventas-vivero-emma.csv'
+
+    downloadCsv(rows, exportColumns, filename)
+    toast.add({
+      title: 'CSV descargado',
+      description: `Se exportaron ${rows.length} registros.`,
+      color: 'success'
+    })
+  } catch (error) {
+    toast.add({
+      title: 'No se pudo exportar el CSV',
+      description: error instanceof Error ? error.message : 'Verifica la conexión e inténtalo nuevamente.',
+      color: 'error'
+    })
+  } finally {
+    isExporting.value = false
+  }
+}
+
+async function exportPriceListPdf(): Promise<void> {
+  if (isExporting.value) return
+  isExporting.value = true
+  try {
+    const rows = await loadAllExportRows('productos')
+    const { jsPDF } = await import('jspdf')
+    const pdf = new jsPDF({ unit: 'mm', format: 'a4' })
+    const margin = 16
+    const pageWidth = pdf.internal.pageSize.getWidth()
+    let y = 18
+
+    const addLine = (text: string, size = 10, bold = false) => {
+      pdf.setFont('helvetica', bold ? 'bold' : 'normal')
+      pdf.setFontSize(size)
+      const wrapped = pdf.splitTextToSize(text, pageWidth - margin * 2)
+      if (y + wrapped.length * 5 > 280) {
+        pdf.addPage()
+        y = 18
+      }
+      pdf.text(wrapped, margin, y)
+      y += wrapped.length * 5 + 2
+    }
+
+    addLine('VIVERO EMMA · LISTA DE PRECIOS', 16, true)
+    addLine(`Actualizada: ${new Date().toLocaleDateString('es-AR')}`)
+    y += 3
+    for (const row of rows) {
+      addLine(`${recordValue(row.nombre)} · ${recordValue(row.categoria)} · SKU ${recordValue(row.sku)} · ${currency(Number(row.precio ?? 0))} · Stock: ${recordValue(row.stock)}`)
+    }
+    pdf.save('lista-precios-vivero-emma.pdf')
+    toast.add({
+      title: 'Lista de precios descargada',
+      description: `Se incluyeron ${rows.length} productos e inventario actual.`,
+      color: 'success'
+    })
+  } catch (error) {
+    toast.add({
+      title: 'No se pudo generar el PDF',
+      description: error instanceof Error ? error.message : 'Verifica la conexión e inténtalo nuevamente.',
+      color: 'error'
+    })
+  } finally {
+    isExporting.value = false
+  }
+}
+
+async function openPriceAdjustment(): Promise<void> {
+  try {
+    const response = await $fetch<CategoriesApiResponse>('/api/categories')
+    categoryOptions.value = response.data.map(category => ({
+      label: category.nombre,
+      value: category.id
+    }))
+    selectedPriceCategoryId.value = categoryOptions.value[0]?.value ?? ''
+    priceAdjustmentMode.value = 'percentage'
+    priceAdjustmentAmount.value = ''
+    priceAdjustmentModalOpen.value = true
+  } catch (error) {
+    toast.add({
+      title: 'No se pudieron cargar las categorías',
+      description: error instanceof Error ? error.message : 'Inténtalo nuevamente.',
+      color: 'error'
+    })
+  }
+}
+
+async function applyCategoryPriceAdjustment(): Promise<void> {
+  const amount = Number(priceAdjustmentAmount.value)
+  if (!selectedPriceCategoryId.value || !priceAdjustmentAmount.value.trim() || !Number.isFinite(amount)) {
+    toast.add({ title: 'Completa la categoría y el ajuste', color: 'error' })
+    return
+  }
+  if (isApplyingPriceAdjustment.value) return
+
+  isApplyingPriceAdjustment.value = true
+  try {
+    const response = await $fetch<{ data: { updated: number } }>('/api/stock/prices/bulk', {
+      method: 'POST',
+      body: {
+        categoryId: Number(selectedPriceCategoryId.value),
+        mode: priceAdjustmentMode.value,
+        amount
+      }
+    })
+    priceAdjustmentModalOpen.value = false
+    toast.add({
+      title: 'Precios actualizados',
+      description: `Se actualizaron ${response.data.updated} productos de la categoría.`,
+      color: 'success'
+    })
+    await refresh()
+  } catch (error) {
+    toast.add({
+      title: 'No se pudieron actualizar los precios',
+      description: error instanceof Error ? error.message : 'No se aplicaron cambios.',
+      color: 'error'
+    })
+  } finally {
+    isApplyingPriceAdjustment.value = false
   }
 }
 
@@ -965,6 +1274,48 @@ function visibleCardFields(row: ManagementRow) {
           </div>
         </div>
 
+        <div v-if="canExportData" class="mb-4 flex flex-wrap justify-end gap-2">
+          <UButton
+            v-if="section === 'productos'"
+            label="Ingresar reposición"
+            icon="i-lucide-package-plus"
+            color="primary"
+            variant="subtle"
+            to="/dashboard/inventory/replenish"
+            class="min-h-11"
+          />
+          <UButton
+            v-if="section === 'productos'"
+            label="Ajuste masivo de precios"
+            icon="i-lucide-tags"
+            color="neutral"
+            variant="subtle"
+            class="min-h-11"
+            @click="openPriceAdjustment"
+          />
+          <UButton
+            label="Exportar CSV"
+            icon="i-lucide-file-spreadsheet"
+            color="neutral"
+            variant="subtle"
+            :loading="isExporting"
+            :disabled="isExporting"
+            class="min-h-11"
+            @click="exportCsv"
+          />
+          <UButton
+            v-if="section === 'productos'"
+            label="Lista de precios PDF"
+            icon="i-lucide-file-text"
+            color="neutral"
+            variant="subtle"
+            :loading="isExporting"
+            :disabled="isExporting"
+            class="min-h-11"
+            @click="exportPriceListPdf"
+          />
+        </div>
+
         <UAlert
           v-if="section === 'ventas'"
           color="neutral"
@@ -980,9 +1331,25 @@ function visibleCardFields(row: ManagementRow) {
           <span>{{ rangeStart }}–{{ rangeEnd }} de {{ totalRows }}</span>
         </div>
 
-        <div v-if="isLoading" class="space-y-3">
-          <USkeleton class="h-24 w-full" />
-          <USkeleton class="h-24 w-full" />
+        <div v-if="isLoading" aria-busy="true" aria-label="Cargando registros">
+          <div class="space-y-3 md:hidden">
+            <UCard v-for="card in 3" :key="card">
+              <div class="space-y-3">
+                <USkeleton class="h-5 w-2/3" />
+                <USkeleton class="h-4 w-full" />
+                <USkeleton class="h-4 w-4/5" />
+                <USkeleton class="h-4 w-1/2" />
+              </div>
+            </UCard>
+          </div>
+          <div class="hidden space-y-3 md:block">
+            <div class="grid grid-cols-6 gap-4 rounded-lg bg-elevated/50 px-4 py-3">
+              <USkeleton v-for="column in 6" :key="column" class="h-4 w-3/4" />
+            </div>
+            <div v-for="row in 6" :key="row" class="grid grid-cols-6 gap-4 border-b border-default px-4 py-4">
+              <USkeleton v-for="column in 6" :key="column" class="h-5 w-full" />
+            </div>
+          </div>
         </div>
 
         <div v-else-if="displayRows.length" class="grid gap-3 md:hidden">
@@ -1020,6 +1387,17 @@ function visibleCardFields(row: ManagementRow) {
                 </span>
               </div>
               <div v-if="isEditable || section === 'facturas'" class="flex flex-wrap justify-end gap-2 border-t border-default pt-3">
+                <UButton
+                  v-if="section === 'productos' && !isRecordArchived(row)"
+                  :label="row.estado === 'Borrador' ? 'Publicar' : 'Ocultar'"
+                  :icon="row.estado === 'Borrador' ? 'i-lucide-eye' : 'i-lucide-eye-off'"
+                  :color="row.estado === 'Borrador' ? 'success' : 'neutral'"
+                  variant="subtle"
+                  class="min-h-11"
+                  :loading="togglingProductId === row.id"
+                  :disabled="togglingProductId !== null"
+                  @click="toggleProductVisibility(row)"
+                />
                 <UButton
                   v-if="section === 'ventas' && canCompleteSale(row)"
                   label="Completar venta"
@@ -1079,7 +1457,7 @@ function visibleCardFields(row: ManagementRow) {
           </p>
         </div>
 
-        <div class="hidden overflow-x-auto md:block">
+        <div v-if="!isLoading" class="hidden overflow-x-auto md:block">
           <UTable
             :data="displayRows"
             :columns="columns"
@@ -1216,6 +1594,22 @@ function visibleCardFields(row: ManagementRow) {
                     {{ form.imageUrl ? 'No se pudo cargar la imagen desde esa URL.' : 'Puedes pegar una URL o elegir un archivo para cargarla en imgbb.' }}
                   </p>
                 </div>
+                <div v-else-if="section === 'productos' && formField.key === 'categoria'" class="flex gap-2">
+                  <USelect
+                    v-model="form.categoryId"
+                    :items="categoryOptions"
+                    :disabled="categoryOptions.length === 0"
+                    placeholder="Selecciona una categoría"
+                    class="w-full"
+                  />
+                  <UButton
+                    label="+ Nueva categoría"
+                    color="neutral"
+                    variant="subtle"
+                    class="min-h-11 shrink-0"
+                    @click="categoryModalOpen = true"
+                  />
+                </div>
                 <component
                   :is="formField.type === 'select' ? USelectComponent : UInputComponent"
                   v-else
@@ -1253,6 +1647,99 @@ function visibleCardFields(row: ManagementRow) {
               || salesDraftStore.hasUnpricedLines
               || salesDraftStore.hasStockIssues
             )"
+            class="min-h-11"
+          />
+        </div>
+      </form>
+    </template>
+  </UModal>
+
+  <UModal
+    v-model:open="categoryModalOpen"
+    title="Nueva categoría"
+    description="La categoría se guardará y quedará seleccionada en el producto actual."
+    :ui="{ content: 'sm:max-w-md' }"
+  >
+    <template #body>
+      <form class="space-y-4" @submit.prevent="createCategoryFromProductForm">
+        <UFormField label="Nombre" required>
+          <UInput
+            v-model="newCategoryName"
+            maxlength="50"
+            autofocus
+            placeholder="Ej.: Plantas de interior"
+            class="w-full"
+          />
+        </UFormField>
+        <div class="grid grid-cols-2 gap-2">
+          <UButton
+            label="Cancelar"
+            color="neutral"
+            variant="subtle"
+            class="min-h-11"
+            :disabled="isCreatingCategory"
+            @click="categoryModalOpen = false"
+          />
+          <UButton
+            label="Crear categoría"
+            type="submit"
+            :loading="isCreatingCategory"
+            class="min-h-11"
+          />
+        </div>
+      </form>
+    </template>
+  </UModal>
+
+  <UModal
+    v-model:open="priceAdjustmentModalOpen"
+    title="Ajuste masivo de precios"
+    description="El ajuste se aplicará a todos los productos activos de la categoría seleccionada."
+    :ui="{ content: 'sm:max-w-lg' }"
+  >
+    <template #body>
+      <form class="space-y-4" @submit.prevent="applyCategoryPriceAdjustment">
+        <UFormField label="Categoría" required>
+          <USelect
+            v-model="selectedPriceCategoryId"
+            :items="categoryOptions"
+            placeholder="Selecciona una categoría"
+            class="w-full"
+          />
+        </UFormField>
+        <UFormField label="Tipo de ajuste" required>
+          <USelect
+            v-model="priceAdjustmentMode"
+            :items="[
+              { label: 'Porcentaje (%)', value: 'percentage' },
+              { label: 'Importe fijo ($)', value: 'fixed' }
+            ]"
+            class="w-full"
+          />
+        </UFormField>
+        <UFormField :label="priceAdjustmentMode === 'percentage' ? 'Porcentaje (usa negativo para descontar)' : 'Importe (usa negativo para descontar)'" required>
+          <UInput
+            v-model="priceAdjustmentAmount"
+            type="number"
+            step="0.01"
+            :min="priceAdjustmentMode === 'percentage' ? -100 : -99999999.99"
+            :max="priceAdjustmentMode === 'percentage' ? 10000 : 99999999.99"
+            class="w-full"
+          />
+        </UFormField>
+        <div class="grid grid-cols-2 gap-2">
+          <UButton
+            label="Cancelar"
+            color="neutral"
+            variant="subtle"
+            class="min-h-11"
+            :disabled="isApplyingPriceAdjustment"
+            @click="priceAdjustmentModalOpen = false"
+          />
+          <UButton
+            label="Aplicar a la categoría"
+            type="submit"
+            :loading="isApplyingPriceAdjustment"
             class="min-h-11"
           />
         </div>

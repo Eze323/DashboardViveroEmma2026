@@ -30,6 +30,10 @@ const managementLinks: NavigationMenuItem[] = [{
   icon: 'i-lucide-folders',
   to: '/admin/categorias'
 }, {
+  label: 'Ingreso de reposiciones',
+  icon: 'i-lucide-package-plus',
+  to: '/dashboard/inventory/replenish'
+}, {
   label: 'Proveedores',
   icon: 'i-lucide-truck',
   to: '/admin/proveedores'

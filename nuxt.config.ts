@@ -27,6 +27,9 @@ export default defineNuxtConfig({
   routeRules: {
     '/api/**': {
       cors: true
+    },
+    '/products': {
+      redirect: '/admin/productos'
     }
   },
 

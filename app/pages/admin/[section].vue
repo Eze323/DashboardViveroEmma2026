@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { h, resolveComponent } from 'vue'
-import type { TableColumn } from '@nuxt/ui'
+import type { DropdownMenuItem, TableColumn } from '@nuxt/ui'
 import { useSalesDraftStore } from '~/stores/salesDraft'
 import { downloadCsv } from '~/utils/csv'
 import type { ManagementField, ManagementRow, ViveroSection } from '~/utils/vivero'
@@ -1170,6 +1170,170 @@ async function shareReceipt(row: ManagementRow) {
 function visibleCardFields(row: ManagementRow) {
   return tableFields.value.filter(field => field.key !== 'archivado' && field.key !== 'imageUrl' && row[field.key] !== undefined).slice(0, 4)
 }
+
+function clearSearch() {
+  searchInput.value = ''
+  search.value = ''
+  page.value = 1
+  nextTick(() => {
+    const el = document.getElementById('inventory-search-input') as HTMLInputElement | null
+    if (el) el.focus()
+  })
+}
+
+function focusSearchInput() {
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+  nextTick(() => {
+    const el = document.getElementById('inventory-search-input') as HTMLInputElement | null
+    if (el) {
+      el.focus()
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  })
+}
+
+function getProductStockBadge(row: ManagementRow) {
+  const stock = Number(row.stock ?? 0)
+  const isDraft = row.estado === 'Borrador'
+
+  if (isDraft) {
+    return {
+      color: 'neutral' as const,
+      variant: 'subtle' as const,
+      label: 'Borrador',
+      icon: 'i-lucide-eye-off'
+    }
+  }
+
+  if (stock <= 0 || row.estado === 'Sin stock') {
+    return {
+      color: 'error' as const,
+      variant: 'subtle' as const,
+      label: 'Sin stock (0)',
+      icon: 'i-lucide-alert-circle'
+    }
+  }
+
+  if (stock <= 5) {
+    return {
+      color: 'warning' as const,
+      variant: 'subtle' as const,
+      label: `Crítico (${stock})`,
+      icon: 'i-lucide-alert-triangle'
+    }
+  }
+
+  return {
+    color: 'success' as const,
+    variant: 'subtle' as const,
+    label: `${stock} un.`,
+    icon: 'i-lucide-check-circle'
+  }
+}
+
+function getProductCardActions(row: ManagementRow): DropdownMenuItem[][] {
+  const isArchived = isRecordArchived(row)
+  const isDraft = row.estado === 'Borrador'
+
+  const items: DropdownMenuItem[] = []
+
+  if (!isArchived) {
+    items.push({
+      label: isDraft ? 'Publicar producto' : 'Ocultar producto',
+      icon: isDraft ? 'i-lucide-eye' : 'i-lucide-eye-off',
+      onSelect: () => toggleProductVisibility(row)
+    })
+    items.push({
+      label: 'Editar completo',
+      icon: 'i-lucide-pencil',
+      onSelect: () => openEditModal(row)
+    })
+  }
+
+  if (canArchiveRecord(row)) {
+    items.push({
+      label: 'Archivar producto',
+      icon: 'i-lucide-archive',
+      color: 'error' as const,
+      onSelect: () => confirmArchive(row)
+    })
+  } else if (supportsArchive.value && isArchived) {
+    items.push({
+      label: 'Restaurar producto',
+      icon: 'i-lucide-archive-restore',
+      color: 'primary' as const,
+      onSelect: () => restoreRecord(row)
+    })
+  }
+
+  return [items]
+}
+
+const quickStockModalOpen = ref(false)
+const quickStockRow = ref<ManagementRow | null>(null)
+const quickStockQuantity = ref<number>(1)
+const quickStockNewPrice = ref<string>('')
+const isQuickStockSaving = ref(false)
+
+function openQuickStock(row: ManagementRow) {
+  quickStockRow.value = row
+  quickStockQuantity.value = 1
+  quickStockNewPrice.value = row.precio !== undefined ? String(row.precio) : ''
+  quickStockModalOpen.value = true
+}
+
+async function saveQuickStock() {
+  if (!quickStockRow.value || isQuickStockSaving.value) return
+  const quantity = Number(quickStockQuantity.value)
+  if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+    toast.add({
+      title: 'Cantidad inválida',
+      description: 'Ingresa un número entero mayor a 0.',
+      color: 'error'
+    })
+    return
+  }
+
+  isQuickStockSaving.value = true
+  try {
+    const priceRaw = quickStockNewPrice.value.trim()
+    const newPriceVal = priceRaw ? Number(priceRaw) : undefined
+    if (newPriceVal !== undefined && (!Number.isFinite(newPriceVal) || newPriceVal < 0)) {
+      toast.add({
+        title: 'Precio inválido',
+        description: 'El precio debe ser un número positivo.',
+        color: 'error'
+      })
+      isQuickStockSaving.value = false
+      return
+    }
+
+    await $fetch('/api/stock/replenish', {
+      method: 'POST',
+      body: [{
+        productId: Number(quickStockRow.value.id),
+        addedQuantity: quantity,
+        ...(newPriceVal !== undefined ? { newPrice: newPriceVal } : {})
+      }]
+    })
+
+    toast.add({
+      title: 'Stock actualizado',
+      description: `Se sumaron +${quantity} unidades a "${recordValue(quickStockRow.value.nombre)}".`,
+      color: 'success'
+    })
+    quickStockModalOpen.value = false
+    await refresh()
+  } catch (error) {
+    toast.add({
+      title: 'No se pudo actualizar el stock',
+      description: error instanceof Error ? error.message : 'Inténtalo nuevamente.',
+      color: 'error'
+    })
+  } finally {
+    isQuickStockSaving.value = false
+  }
+}
 </script>
 
 <template>
@@ -1193,15 +1357,29 @@ function visibleCardFields(row: ManagementRow) {
 
     <template #body>
       <template v-if="managementModule">
-        <div class="mb-5 flex items-start gap-3">
-          <UIcon :name="managementModule.icon" class="mt-1 size-5 shrink-0 text-primary" />
-          <div>
-            <h2 class="text-lg font-semibold text-highlighted">
-              {{ managementModule.title }}
-            </h2>
-            <p class="mt-1 text-sm text-muted">
-              {{ managementModule.description }}
-            </p>
+        <div class="mb-5 flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-start gap-3">
+            <UIcon :name="managementModule.icon" class="mt-1 size-5 shrink-0 text-primary" />
+            <div>
+              <div class="flex flex-wrap items-center gap-2">
+                <h2 class="text-lg font-semibold text-highlighted">
+                  {{ managementModule.title }}
+                </h2>
+                <UBadge
+                  v-if="isDatabaseSection"
+                  color="success"
+                  variant="subtle"
+                  size="xs"
+                  class="font-normal"
+                >
+                  <UIcon name="i-lucide-database" class="mr-1 size-3" />
+                  PostgreSQL
+                </UBadge>
+              </div>
+              <p class="mt-0.5 text-sm text-muted">
+                {{ managementModule.description }}
+              </p>
+            </div>
           </div>
         </div>
 
@@ -1213,25 +1391,7 @@ function visibleCardFields(row: ManagementRow) {
           class="mb-4"
         />
         <UAlert
-          v-else-if="isDatabaseSection && isEditable"
-          color="success"
-          variant="subtle"
-          icon="i-lucide-database"
-          title="Datos conectados"
-          description="Los cambios se guardan en PostgreSQL. Los registros relacionados se archivan para conservar el historial."
-          class="mb-4"
-        />
-        <UAlert
-          v-else-if="isDatabaseSection"
-          color="neutral"
-          variant="subtle"
-          icon="i-lucide-database"
-          title="Vista derivada o de solo lectura"
-          description="Esta información se calcula desde los registros existentes o se conserva como comprobante."
-          class="mb-4"
-        />
-        <UAlert
-          v-else
+          v-else-if="!isDatabaseSection"
           color="warning"
           variant="subtle"
           icon="i-lucide-flask-conical"
@@ -1240,27 +1400,71 @@ function visibleCardFields(row: ManagementRow) {
           class="mb-4"
         />
 
-        <div class="mb-4 grid gap-3 sm:grid-cols-2">
-          <UInput
-            v-model="searchInput"
-            icon="i-lucide-search"
-            placeholder="Buscar..."
-            aria-label="Buscar registros"
-            class="w-full"
-          />
+        <div class="mb-4 grid gap-3 sm:grid-cols-2 sm:items-start">
+          <!-- Columna izquierda: Buscador + Filtros rápidos integrados -->
+          <div class="space-y-2">
+            <UInput
+              id="inventory-search-input"
+              v-model="searchInput"
+              icon="i-lucide-search"
+              :placeholder="section === 'productos' ? 'Buscar por nombre, SKU o categoría...' : 'Buscar...'"
+              :aria-label="section === 'productos' ? 'Buscar productos e inventario' : 'Buscar registros'"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+              inputmode="search"
+              enterkeyhint="search"
+              class="w-full text-base sm:text-sm"
+            >
+              <template v-if="searchInput" #trailing>
+                <UButton
+                  icon="i-lucide-x"
+                  color="neutral"
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Limpiar búsqueda"
+                  class="text-muted hover:text-highlighted touch-manipulation"
+                  @click="clearSearch"
+                />
+              </template>
+            </UInput>
+
+            <!-- Filtros rápidos para productos (Sin corte visual, altura cómoda) -->
+            <div v-if="section === 'productos'" class="flex items-center gap-1.5 overflow-x-auto py-1">
+              <UButton
+                v-for="filterItem in [
+                  { label: 'Todos', value: 'Todos', color: 'primary' },
+                  { label: 'Publicados', value: 'Publicado', color: 'success' },
+                  { label: 'Sin stock', value: 'Sin stock', color: 'error' },
+                  { label: 'Borradores', value: 'Borrador', color: 'neutral' }
+                ]"
+                :key="filterItem.value"
+                size="xs"
+                :variant="statusFilter === filterItem.value ? 'solid' : 'subtle'"
+                :color="(statusFilter === filterItem.value ? filterItem.color : 'neutral') as any"
+                class="shrink-0 rounded-lg font-medium touch-manipulation transition-all"
+                :label="filterItem.label"
+                @click="statusFilter = filterItem.value"
+              />
+            </div>
+          </div>
+
+          <!-- Columna derecha: Controles y paginación -->
           <div class="grid grid-cols-2 gap-2">
             <USelect
-              v-if="showStatusFilter"
+              v-if="section !== 'productos' && showStatusFilter"
               v-model="statusFilter"
               :items="['Todos', ...statusOptions]"
               aria-label="Filtrar por estado"
-              class="w-full"
+              class="w-full text-base sm:text-sm"
             />
             <USelect
               v-model="pageSize"
               :items="[{ label: '20 por página', value: '20' }, { label: '50 por página', value: '50' }]"
               aria-label="Registros por página"
-              class="w-full"
+              :class="section === 'productos' ? 'col-span-2' : 'w-full'"
+              class="text-base sm:text-sm"
             />
             <UButton
               v-if="supportsArchive"
@@ -1268,7 +1472,7 @@ function visibleCardFields(row: ManagementRow) {
               :icon="archivedView ? 'i-lucide-list' : 'i-lucide-archive'"
               color="neutral"
               variant="subtle"
-              class="col-span-2 min-h-11"
+              class="col-span-2 min-h-10 touch-manipulation"
               @click="archivedView = !archivedView"
             />
           </div>
@@ -1352,100 +1556,187 @@ function visibleCardFields(row: ManagementRow) {
           </div>
         </div>
 
-        <div v-else-if="displayRows.length" class="grid gap-3 md:hidden">
-          <UCard v-for="row in displayRows" :key="row.id">
-            <div class="space-y-3">
-              <button
-                v-if="section === 'productos' && row.imageUrl && !failedProductImages[recordValue(row.imageUrl)]"
-                type="button"
-                class="flex min-h-20 w-full items-center gap-3 rounded-lg bg-elevated/40 p-2 text-left focus-visible:outline-2 focus-visible:outline-primary"
-                :aria-label="`Ampliar imagen de ${recordValue(row.nombre)}`"
-                @click="openProductImage(row)"
-              >
-                <img
-                  :src="recordValue(row.imageUrl)"
-                  :alt="recordValue(row.nombre)"
-                  class="size-16 shrink-0 rounded-lg object-cover"
-                  loading="lazy"
-                  @error="markProductImageFailed(recordValue(row.imageUrl))"
+        <div v-else-if="displayRows.length" class="space-y-3 md:hidden">
+          <!-- Mobile Product Cards (Ultra touch-friendly) -->
+          <template v-if="section === 'productos'">
+            <div
+              v-for="row in displayRows"
+              :key="row.id"
+              class="group relative flex flex-col justify-between rounded-2xl border border-default bg-elevated/40 p-3.5 shadow-xs transition-colors hover:border-primary/40 active:border-primary/60 sm:p-4"
+            >
+              <!-- Top Row: Thumbnail + Details + Stock Badge -->
+              <div class="flex items-start gap-3">
+                <!-- Thumbnail Image with modal preview -->
+                <button
+                  v-if="row.imageUrl && !failedProductImages[recordValue(row.imageUrl)]"
+                  type="button"
+                  class="group/thumb relative size-20 shrink-0 overflow-hidden rounded-xl border border-default bg-elevated/80 focus-visible:outline-2 focus-visible:outline-primary sm:size-24 touch-manipulation"
+                  :aria-label="`Ampliar imagen de ${recordValue(row.nombre)}`"
+                  @click="openProductImage(row)"
                 >
-                <span class="text-xs font-medium text-muted">Toca la imagen para verla ampliada</span>
-              </button>
-              <div
-                v-else-if="section === 'productos'"
-                class="flex size-16 items-center justify-center rounded-lg bg-elevated text-muted"
-                aria-label="Producto sin imagen"
-              >
-                <UIcon name="i-lucide-image-off" class="size-6" />
+                  <img
+                    :src="recordValue(row.imageUrl)"
+                    :alt="recordValue(row.nombre)"
+                    class="size-full object-cover transition-transform duration-300 group-hover/thumb:scale-105"
+                    loading="lazy"
+                    @error="markProductImageFailed(recordValue(row.imageUrl))"
+                  >
+                  <div class="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 transition-opacity group-hover/thumb:opacity-100 group-active/thumb:opacity-100">
+                    <UIcon name="i-lucide-maximize-2" class="size-4 text-white drop-shadow" />
+                  </div>
+                </button>
+                <div
+                  v-else
+                  class="flex size-20 shrink-0 flex-col items-center justify-center rounded-xl border border-dashed border-default bg-elevated/60 text-muted sm:size-24"
+                  aria-label="Producto sin imagen"
+                >
+                  <UIcon name="i-lucide-flower-2" class="size-7 opacity-50 text-primary" />
+                  <span class="mt-1 text-[10px] font-medium tracking-tight">Sin foto</span>
+                </div>
+
+                <!-- Info Column -->
+                <div class="min-w-0 flex-1">
+                  <!-- SKU, Category & Stock Badge in corner -->
+                  <div class="flex items-start justify-between gap-1.5">
+                    <div class="flex flex-wrap items-center gap-1 text-xs text-muted truncate">
+                      <span v-if="row.sku" class="font-mono font-medium tracking-wide text-highlighted/70 uppercase">
+                        {{ recordValue(row.sku) }}
+                      </span>
+                      <span v-if="row.sku && row.categoria" class="opacity-40">·</span>
+                      <span v-if="row.categoria" class="truncate font-medium">
+                        {{ recordValue(row.categoria) }}
+                      </span>
+                    </div>
+
+                    <!-- Prominent Stock Badge in Top Corner -->
+                    <UBadge
+                      :color="getProductStockBadge(row).color"
+                      :variant="getProductStockBadge(row).variant"
+                      size="sm"
+                      class="shrink-0 font-medium font-mono text-[11px]"
+                    >
+                      <UIcon :name="getProductStockBadge(row).icon" class="mr-0.5 size-3" />
+                      {{ getProductStockBadge(row).label }}
+                    </UBadge>
+                  </div>
+
+                  <!-- Product Name -->
+                  <h3 class="mt-1 text-sm sm:text-base font-semibold text-highlighted line-clamp-2 leading-snug">
+                    {{ recordValue(row.nombre) }}
+                  </h3>
+
+                  <!-- Price & Pot Size -->
+                  <div class="mt-1.5 flex items-baseline justify-between gap-2">
+                    <span class="text-base sm:text-lg font-bold tracking-tight text-highlighted">
+                      {{ currency(Number(row.precio ?? 0)) }}
+                    </span>
+                    <span v-if="row.potSize" class="text-xs font-normal text-muted truncate">
+                      {{ recordValue(row.potSize) }}
+                    </span>
+                  </div>
+                </div>
               </div>
-              <div v-for="field in visibleCardFields(row)" :key="field.key" class="flex items-start justify-between gap-4">
-                <span class="shrink-0 text-xs font-medium uppercase tracking-wide text-muted">
-                  {{ field.label }}
-                </span>
-                <span class="break-words text-right text-sm font-medium text-highlighted">
-                  {{ formatCell(field, row[field.key]) }}
-                </span>
-              </div>
-              <div v-if="isEditable || section === 'facturas'" class="flex flex-wrap justify-end gap-2 border-t border-default pt-3">
+
+              <!-- Tactile Action Footer -->
+              <div class="mt-3 flex items-center justify-between gap-2 border-t border-default/70 pt-2.5">
+                <!-- Tactile + Stock button -->
                 <UButton
-                  v-if="section === 'productos' && !isRecordArchived(row)"
-                  :label="row.estado === 'Borrador' ? 'Publicar' : 'Ocultar'"
-                  :icon="row.estado === 'Borrador' ? 'i-lucide-eye' : 'i-lucide-eye-off'"
-                  :color="row.estado === 'Borrador' ? 'success' : 'neutral'"
-                  variant="subtle"
-                  class="min-h-11"
-                  :loading="togglingProductId === row.id"
-                  :disabled="togglingProductId !== null"
-                  @click="toggleProductVisibility(row)"
-                />
-                <UButton
-                  v-if="section === 'ventas' && canCompleteSale(row)"
-                  label="Completar venta"
-                  icon="i-lucide-check"
-                  color="success"
-                  variant="subtle"
-                  class="min-h-11"
-                  @click="confirmCompleteSale(row)"
-                />
-                <UButton
-                  v-if="section === 'ventas' || section === 'facturas'"
-                  label="Compartir PDF"
-                  icon="i-lucide-share-2"
+                  icon="i-lucide-plus"
+                  label="+ Stock"
                   color="primary"
-                  variant="subtle"
-                  class="min-h-11"
-                  @click="shareReceipt(row)"
+                  variant="soft"
+                  class="min-h-11 flex-1 justify-center rounded-xl font-medium touch-manipulation active:scale-[0.98] transition-transform"
+                  :disabled="isRecordArchived(row)"
+                  @click="openQuickStock(row)"
                 />
+
+                <!-- Quick Edit button -->
                 <UButton
-                  v-if="isEditable && !isRecordArchived(row) && isSaleEditable(row)"
-                  label="Editar"
                   icon="i-lucide-pencil"
+                  label="Editar"
                   color="neutral"
                   variant="subtle"
-                  class="min-h-11"
+                  class="min-h-11 px-4 rounded-xl font-medium touch-manipulation active:scale-[0.98] transition-transform"
+                  :disabled="isRecordArchived(row)"
                   @click="openEditModal(row)"
                 />
-                <UButton
-                  v-if="isEditable && canArchiveRecord(row)"
-                  :label="section === 'ventas' ? 'Cancelar venta' : 'Archivar'"
-                  :icon="section === 'ventas' ? 'i-lucide-ban' : 'i-lucide-archive'"
-                  color="error"
-                  variant="subtle"
-                  class="min-h-11"
-                  @click="confirmArchive(row)"
-                />
-                <UButton
-                  v-if="supportsArchive && isRecordArchived(row)"
-                  label="Restaurar"
-                  icon="i-lucide-archive-restore"
-                  color="primary"
-                  variant="subtle"
-                  class="min-h-11"
-                  @click="restoreRecord(row)"
-                />
+
+                <!-- 3-dots actions menu -->
+                <UDropdownMenu :items="getProductCardActions(row)" :content="{ align: 'end' }">
+                  <UButton
+                    icon="i-lucide-ellipsis-vertical"
+                    color="neutral"
+                    variant="ghost"
+                    class="min-h-11 min-w-11 rounded-xl touch-manipulation"
+                    aria-label="Más opciones de producto"
+                  />
+                </UDropdownMenu>
               </div>
             </div>
-          </UCard>
+          </template>
+
+          <!-- Generic cards for other sections (clientes, ventas, etc.) -->
+          <template v-else>
+            <UCard v-for="row in displayRows" :key="row.id">
+              <div class="space-y-3">
+                <div v-for="field in visibleCardFields(row)" :key="field.key" class="flex items-start justify-between gap-4">
+                  <span class="shrink-0 text-xs font-medium uppercase tracking-wide text-muted">
+                    {{ field.label }}
+                  </span>
+                  <span class="break-words text-right text-sm font-medium text-highlighted">
+                    {{ formatCell(field, row[field.key]) }}
+                  </span>
+                </div>
+                <div v-if="isEditable || section === 'facturas'" class="flex flex-wrap justify-end gap-2 border-t border-default pt-3">
+                  <UButton
+                    v-if="section === 'ventas' && canCompleteSale(row)"
+                    label="Completar venta"
+                    icon="i-lucide-check"
+                    color="success"
+                    variant="subtle"
+                    class="min-h-11 touch-manipulation"
+                    @click="confirmCompleteSale(row)"
+                  />
+                  <UButton
+                    v-if="section === 'ventas' || section === 'facturas'"
+                    label="Compartir PDF"
+                    icon="i-lucide-share-2"
+                    color="primary"
+                    variant="subtle"
+                    class="min-h-11 touch-manipulation"
+                    @click="shareReceipt(row)"
+                  />
+                  <UButton
+                    v-if="isEditable && !isRecordArchived(row) && isSaleEditable(row)"
+                    label="Editar"
+                    icon="i-lucide-pencil"
+                    color="neutral"
+                    variant="subtle"
+                    class="min-h-11 touch-manipulation"
+                    @click="openEditModal(row)"
+                  />
+                  <UButton
+                    v-if="isEditable && canArchiveRecord(row)"
+                    :label="section === 'ventas' ? 'Cancelar venta' : 'Archivar'"
+                    :icon="section === 'ventas' ? 'i-lucide-ban' : 'i-lucide-archive'"
+                    color="error"
+                    variant="subtle"
+                    class="min-h-11 touch-manipulation"
+                    @click="confirmArchive(row)"
+                  />
+                  <UButton
+                    v-if="supportsArchive && isRecordArchived(row)"
+                    label="Restaurar"
+                    icon="i-lucide-archive-restore"
+                    color="primary"
+                    variant="subtle"
+                    class="min-h-11 touch-manipulation"
+                    @click="restoreRecord(row)"
+                  />
+                </div>
+              </div>
+            </UCard>
+          </template>
         </div>
         <div v-else class="rounded-xl border border-dashed border-default p-8 text-center">
           <UIcon name="i-lucide-inbox" class="mx-auto size-8 text-muted" />
@@ -1473,14 +1764,14 @@ function visibleCardFields(row: ManagementRow) {
           />
         </div>
 
-        <div class="mt-5 flex items-center justify-between gap-3">
+        <div class="mt-5 flex items-center justify-between gap-3 pb-24 md:pb-0">
           <UButton
             label="Anterior"
             icon="i-lucide-chevron-left"
             color="neutral"
             variant="subtle"
             :disabled="page <= 1"
-            class="min-h-11"
+            class="min-h-11 touch-manipulation"
             @click="page--"
           />
           <span class="text-sm text-muted">
@@ -1492,9 +1783,50 @@ function visibleCardFields(row: ManagementRow) {
             color="neutral"
             variant="subtle"
             :disabled="page >= totalPages"
-            class="min-h-11"
+            class="min-h-11 touch-manipulation"
             @click="page++"
           />
+        </div>
+
+        <!-- Floating Thumb Zone Actions for Mobile -->
+        <div
+          v-if="managementModule"
+          class="fixed bottom-0 inset-x-0 z-30 md:hidden p-3 bg-elevated/95 backdrop-blur-md border-t border-default/80 shadow-xl transition-transform pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+        >
+          <div class="mx-auto flex max-w-lg items-center gap-2">
+            <!-- Quick Search Focus Button -->
+            <UButton
+              icon="i-lucide-search"
+              color="neutral"
+              variant="subtle"
+              class="min-h-12 flex-1 justify-center rounded-xl font-medium touch-manipulation active:scale-95 transition-transform"
+              @click="focusSearchInput"
+            >
+              <span class="truncate">Buscar</span>
+            </UButton>
+
+            <!-- Quick Replenish Shortcut (Products only) -->
+            <UButton
+              v-if="section === 'productos'"
+              icon="i-lucide-package-plus"
+              color="neutral"
+              variant="subtle"
+              to="/dashboard/inventory/replenish"
+              class="min-h-12 min-w-12 px-3 justify-center rounded-xl touch-manipulation active:scale-95 transition-transform"
+              aria-label="Ingresar reposición masiva"
+            />
+
+            <!-- Primary Action: Nuevo Producto / Nuevo Registro -->
+            <UButton
+              v-if="isEditable && !archivedView"
+              icon="i-lucide-plus"
+              :label="`Nuevo ${managementModule.singular}`"
+              color="primary"
+              variant="solid"
+              class="min-h-12 flex-[1.4] justify-center rounded-xl font-semibold shadow-md touch-manipulation active:scale-95 transition-transform"
+              @click="openCreateModal"
+            />
+          </div>
         </div>
       </template>
       <UAlert
@@ -1510,131 +1842,133 @@ function visibleCardFields(row: ManagementRow) {
     v-model:open="modalOpen"
     :title="`${editingRecord ? 'Editar' : 'Nuevo'} ${managementModule?.singular ?? 'registro'}`"
     :description="section === 'productos' ? 'El SKU se genera de forma automática y no se puede modificar.' : managementModule?.description"
-    :ui="{ content: 'max-h-[90dvh] overflow-y-auto sm:max-w-xl' }"
+    :ui="{ content: 'max-h-[92dvh] sm:max-h-[85vh] overflow-hidden flex flex-col sm:max-w-xl' }"
   >
     <template #body>
-      <form class="space-y-4" @submit.prevent="saveRecord">
-        <ManagementSaleComposer
-          v-if="section === 'ventas'"
-          :key="saleComposerKey"
-          v-model="salesDraftStore.draft"
-          :customers="customerOptions"
-          :allow-new-customer="!editingRecord"
-          :is-editing="Boolean(editingRecord)"
-        />
+      <form class="flex flex-col max-h-[calc(92dvh-8rem)] sm:max-h-[calc(85vh-8rem)]" @submit.prevent="saveRecord">
+        <div class="flex-1 overflow-y-auto overscroll-contain px-1 py-1 space-y-4 pb-16 sm:pb-4">
+          <ManagementSaleComposer
+            v-if="section === 'ventas'"
+            :key="saleComposerKey"
+            v-model="salesDraftStore.draft"
+            :customers="customerOptions"
+            :allow-new-customer="!editingRecord"
+            :is-editing="Boolean(editingRecord)"
+          />
 
-        <template v-else>
-          <template v-for="formField in visibleFields" :key="formField.key">
-            <UFormField
-              :label="formField.label"
-              :name="formField.key"
-              :required="formField.required || (section === 'accesos' && formField.key === 'password' && !editingRecord)"
-              :description="formField.help"
-            >
-              <template #default>
-                <div v-if="section === 'productos' && formField.key === 'imageUrl'" class="space-y-3">
-                  <div class="flex flex-col gap-2 sm:flex-row">
-                    <UInput
-                      v-model="form.imageUrl"
-                      type="url"
-                      placeholder="https://... o pega una URL"
-                      class="w-full"
-                    />
-                    <UButton
-                      label="Subir imagen"
-                      icon="i-lucide-upload"
-                      color="primary"
-                      variant="subtle"
-                      class="min-h-11 shrink-0"
-                      :loading="isUploadingProductImage"
-                      :disabled="!form.imageUrl || isUploadingProductImage"
-                      @click="uploadProductImage(null, form.imageUrl)"
-                    />
-                  </div>
-                  <div class="flex items-center gap-3">
-                    <input
-                      id="product-image-file-input"
-                      ref="imageInputRef"
-                      type="file"
-                      accept="image/*"
-                      class="hidden"
-                      @change="async (event) => {
-                        const file = (event.target as HTMLInputElement).files?.[0] ?? null
-                        if (!file) return
-                        await uploadProductImage(file)
-                        ;(event.target as HTMLInputElement).value = ''
-                      }"
+          <template v-else>
+            <template v-for="formField in visibleFields" :key="formField.key">
+              <UFormField
+                :label="formField.label"
+                :name="formField.key"
+                :required="formField.required || (section === 'accesos' && formField.key === 'password' && !editingRecord)"
+                :description="formField.help"
+              >
+                <template #default>
+                  <div v-if="section === 'productos' && formField.key === 'imageUrl'" class="space-y-3">
+                    <div class="flex flex-col gap-2 sm:flex-row">
+                      <UInput
+                        v-model="form.imageUrl"
+                        type="url"
+                        placeholder="https://... o pega una URL"
+                        class="w-full text-base sm:text-sm min-h-11"
+                      />
+                      <UButton
+                        label="Subir imagen"
+                        icon="i-lucide-upload"
+                        color="primary"
+                        variant="subtle"
+                        class="min-h-11 shrink-0 touch-manipulation"
+                        :loading="isUploadingProductImage"
+                        :disabled="!form.imageUrl || isUploadingProductImage"
+                        @click="uploadProductImage(null, form.imageUrl)"
+                      />
+                    </div>
+                    <div class="flex items-center gap-3">
+                      <input
+                        id="product-image-file-input"
+                        ref="imageInputRef"
+                        type="file"
+                        accept="image/*"
+                        class="hidden"
+                        @change="async (event) => {
+                          const file = (event.target as HTMLInputElement).files?.[0] ?? null
+                          if (!file) return
+                          await uploadProductImage(file)
+                          ;(event.target as HTMLInputElement).value = ''
+                        }"
+                      >
+                      <UButton
+                        label="Elegir archivo"
+                        icon="i-lucide-image"
+                        color="neutral"
+                        variant="subtle"
+                        class="min-h-11 touch-manipulation"
+                        @click="triggerImagePicker"
+                      />
+                      <span v-if="imageUploadError" class="text-xs text-error">{{ imageUploadError }}</span>
+                    </div>
+                    <button
+                      v-if="form.imageUrl && !failedProductImages[form.imageUrl]"
+                      type="button"
+                      class="block max-w-full rounded-xl border border-default p-1 focus-visible:outline-2 focus-visible:outline-primary touch-manipulation"
+                      aria-label="Ampliar vista previa de la imagen"
+                      @click="focusedProductImage = { src: form.imageUrl, alt: form.nombre || 'Vista previa del producto' }"
                     >
+                      <img
+                        :src="form.imageUrl"
+                        :alt="form.nombre || 'Vista previa del producto'"
+                        class="max-h-48 max-w-full rounded-lg object-contain"
+                        loading="lazy"
+                        @error="markProductImageFailed(form.imageUrl)"
+                      >
+                    </button>
+                    <p v-else class="text-xs text-muted">
+                      {{ form.imageUrl ? 'No se pudo cargar la imagen desde esa URL.' : 'Puedes pegar una URL o elegir un archivo para cargarla en imgbb.' }}
+                    </p>
+                  </div>
+                  <div v-else-if="section === 'productos' && formField.key === 'categoria'" class="flex gap-2">
+                    <USelect
+                      v-model="form.categoryId"
+                      :items="categoryOptions"
+                      :disabled="categoryOptions.length === 0"
+                      placeholder="Selecciona una categoría"
+                      class="w-full text-base sm:text-sm min-h-11"
+                    />
                     <UButton
-                      label="Elegir archivo"
-                      icon="i-lucide-image"
+                      label="+ Nueva categoría"
                       color="neutral"
                       variant="subtle"
-                      class="min-h-11"
-                      @click="triggerImagePicker"
+                      class="min-h-11 shrink-0 touch-manipulation"
+                      @click="categoryModalOpen = true"
                     />
-                    <span v-if="imageUploadError" class="text-xs text-error">{{ imageUploadError }}</span>
                   </div>
-                  <button
-                    v-if="form.imageUrl && !failedProductImages[form.imageUrl]"
-                    type="button"
-                    class="block max-w-full rounded-xl border border-default p-1 focus-visible:outline-2 focus-visible:outline-primary"
-                    aria-label="Ampliar vista previa de la imagen"
-                    @click="focusedProductImage = { src: form.imageUrl, alt: form.nombre || 'Vista previa del producto' }"
-                  >
-                    <img
-                      :src="form.imageUrl"
-                      :alt="form.nombre || 'Vista previa del producto'"
-                      class="max-h-48 max-w-full rounded-lg object-contain"
-                      loading="lazy"
-                      @error="markProductImageFailed(form.imageUrl)"
-                    >
-                  </button>
-                  <p v-else class="text-xs text-muted">
-                    {{ form.imageUrl ? 'No se pudo cargar la imagen desde esa URL.' : 'Puedes pegar una URL o elegir un archivo para cargarla en imgbb.' }}
-                  </p>
-                </div>
-                <div v-else-if="section === 'productos' && formField.key === 'categoria'" class="flex gap-2">
-                  <USelect
-                    v-model="form.categoryId"
-                    :items="categoryOptions"
-                    :disabled="categoryOptions.length === 0"
-                    placeholder="Selecciona una categoría"
-                    class="w-full"
+                  <component
+                    :is="formField.type === 'select' ? USelectComponent : UInputComponent"
+                    v-else
+                    v-model="form[formField.key]"
+                    :items="formField.type === 'select'
+                      ? formField.key === 'productoId' ? productOptions : formField.key === 'proveedorId' ? supplierOptions : formField.options ?? []
+                      : undefined"
+                    :type="formField.type === 'select' ? undefined : formField.type ?? 'text'"
+                    :min="formField.type === 'number' ? 0 : undefined"
+                    :step="formField.format === 'currency' ? '0.01' : formField.type === 'number' ? '1' : undefined"
+                    :disabled="formField.readonly"
+                    :placeholder="section === 'productos' && formField.key === 'imageUrl' ? 'https://...' : undefined"
+                    class="w-full text-base sm:text-sm min-h-11"
                   />
-                  <UButton
-                    label="+ Nueva categoría"
-                    color="neutral"
-                    variant="subtle"
-                    class="min-h-11 shrink-0"
-                    @click="categoryModalOpen = true"
-                  />
-                </div>
-                <component
-                  :is="formField.type === 'select' ? USelectComponent : UInputComponent"
-                  v-else
-                  v-model="form[formField.key]"
-                  :items="formField.type === 'select'
-                    ? formField.key === 'productoId' ? productOptions : formField.key === 'proveedorId' ? supplierOptions : formField.options ?? []
-                    : undefined"
-                  :type="formField.type === 'select' ? undefined : formField.type ?? 'text'"
-                  :min="formField.type === 'number' ? 0 : undefined"
-                  :step="formField.format === 'currency' ? '0.01' : formField.type === 'number' ? '1' : undefined"
-                  :disabled="formField.readonly"
-                  :placeholder="section === 'productos' && formField.key === 'imageUrl' ? 'https://...' : undefined"
-                  class="w-full"
-                />
-              </template>
-            </UFormField>
+                </template>
+              </UFormField>
+            </template>
           </template>
-        </template>
+        </div>
 
-        <div class="grid grid-cols-2 gap-2 border-t border-default pt-4">
+        <div class="sticky bottom-0 -mx-4 -mb-4 bg-elevated/95 backdrop-blur-md border-t border-default p-4 shadow-lg grid grid-cols-2 gap-2 z-10">
           <UButton
             label="Cancelar"
             color="neutral"
             variant="subtle"
-            class="min-h-11"
+            class="min-h-11 touch-manipulation"
             @click="modalOpen = false"
           />
           <UButton
@@ -1647,10 +1981,121 @@ function visibleCardFields(row: ManagementRow) {
               || salesDraftStore.hasUnpricedLines
               || salesDraftStore.hasStockIssues
             )"
-            class="min-h-11"
+            class="min-h-11 touch-manipulation font-semibold"
           />
         </div>
       </form>
+    </template>
+  </UModal>
+
+  <UModal
+    v-model:open="quickStockModalOpen"
+    title="Ingreso rápido de stock"
+    :description="quickStockRow ? `${recordValue(quickStockRow.nombre)} · ${recordValue(quickStockRow.sku) || 'Sin SKU'}` : ''"
+    :ui="{ content: 'max-h-[92dvh] overflow-y-auto overscroll-contain sm:max-w-md' }"
+  >
+    <template #body>
+      <div v-if="quickStockRow" class="space-y-4">
+        <!-- Product snapshot -->
+        <div class="flex items-center gap-3 rounded-xl border border-default bg-elevated/40 p-3">
+          <img
+            v-if="quickStockRow.imageUrl && !failedProductImages[recordValue(quickStockRow.imageUrl)]"
+            :src="recordValue(quickStockRow.imageUrl)"
+            :alt="recordValue(quickStockRow.nombre)"
+            class="size-14 rounded-lg object-cover border border-default shrink-0"
+          >
+          <div v-else class="flex size-14 items-center justify-center rounded-lg bg-elevated text-muted shrink-0 border border-default">
+            <UIcon name="i-lucide-flower-2" class="size-6 text-primary" />
+          </div>
+          <div class="min-w-0 flex-1">
+            <p class="font-semibold text-highlighted truncate text-sm">
+              {{ recordValue(quickStockRow.nombre) }}
+            </p>
+            <div class="mt-0.5 flex items-center gap-2 text-xs text-muted">
+              <span>Stock actual: <strong class="font-mono text-highlighted">{{ quickStockRow.stock ?? 0 }}</strong> un.</span>
+              <span>·</span>
+              <span>{{ currency(Number(quickStockRow.precio ?? 0)) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Increment selector -->
+        <UFormField label="Cantidad a sumar al stock" required description="Toca un incremento rápido o escribe el valor exacto.">
+          <div class="space-y-2.5">
+            <!-- Preset buttons -->
+            <div class="grid grid-cols-4 gap-2">
+              <UButton
+                v-for="amt in [1, 5, 10, 25]"
+                :key="amt"
+                :label="`+${amt}`"
+                color="neutral"
+                :variant="quickStockQuantity === amt ? 'solid' : 'subtle'"
+                class="min-h-11 justify-center font-bold text-sm touch-manipulation"
+                @click="quickStockQuantity = amt"
+              />
+            </div>
+
+            <!-- Number input with +/- controls -->
+            <div class="flex items-center gap-2">
+              <UButton
+                icon="i-lucide-minus"
+                color="neutral"
+                variant="subtle"
+                class="min-h-11 min-w-11 touch-manipulation"
+                :disabled="quickStockQuantity <= 1"
+                @click="quickStockQuantity = Math.max(1, quickStockQuantity - 1)"
+              />
+              <UInput
+                v-model.number="quickStockQuantity"
+                type="number"
+                min="1"
+                step="1"
+                inputmode="numeric"
+                class="w-full text-center font-bold font-mono text-lg min-h-11"
+              />
+              <UButton
+                icon="i-lucide-plus"
+                color="neutral"
+                variant="subtle"
+                class="min-h-11 min-w-11 touch-manipulation"
+                @click="quickStockQuantity = quickStockQuantity + 1"
+              />
+            </div>
+          </div>
+        </UFormField>
+
+        <!-- Optional new price -->
+        <UFormField label="Nuevo precio de venta (opcional)" description="Deja vacío si quieres conservar el precio actual.">
+          <UInput
+            v-model="quickStockNewPrice"
+            type="number"
+            step="0.01"
+            min="0"
+            placeholder="Dejar igual..."
+            class="w-full text-base sm:text-sm min-h-11"
+          />
+        </UFormField>
+
+        <!-- Action buttons -->
+        <div class="grid grid-cols-2 gap-2 border-t border-default pt-3">
+          <UButton
+            label="Cancelar"
+            color="neutral"
+            variant="subtle"
+            class="min-h-11 touch-manipulation"
+            :disabled="isQuickStockSaving"
+            @click="quickStockModalOpen = false"
+          />
+          <UButton
+            label="Confirmar ingreso"
+            icon="i-lucide-check"
+            color="primary"
+            class="min-h-11 touch-manipulation font-semibold"
+            :loading="isQuickStockSaving"
+            @click="saveQuickStock"
+          />
+        </div>
+      </div>
     </template>
   </UModal>
 
